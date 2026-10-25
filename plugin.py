@@ -847,6 +847,8 @@ class NekoDraw(MaiBotPlugin):
     )
     async def configure_planner(self, **kwargs: Any) -> Optional[Dict[str, Any]]:
         changed = self._inject_task_status(kwargs)
+        if self.config.plugin.enabled:
+            changed = self._rewrite_draw_tool_hints(kwargs) or changed
         items = kwargs.get("items")
         messages = kwargs.get("messages")
         focused = not self._stream_id(kwargs)
@@ -1080,39 +1082,102 @@ class NekoDraw(MaiBotPlugin):
     def _planner_instruction(self_reference_enabled: bool = False) -> str:
         if self_reference_enabled:
             return (
-                "仅当当前用户确实要求生成图片时，以下生图说明才适用；历史提及、闲聊和取消不构成任务。"
-                "画你自己、你的自拍、以你为主角或自画像时，用neko_draw并设use_self_reference=true，"
-                "插件会附上管理员提供的角色参考图，按图生图生成；不必先调用query_memory查外貌，不能凭记忆描述替代已配置参考图。"
-                "prompt写本次场景、动作、服装或画风，角色外貌以参考图为主；不要编造图片消息ID或本地文件路径。"
-                "修改用户指定聊天原图用neko_edit_image；若该修改需要机器人角色外貌，再设use_self_reference=true，保留聊天原图并追加角色参考，不用参考图替代编辑对象。"
-                "用户自己的自拍、其他人物和普通场景不等于机器人自画像，不自动选角色参考。Life无人生活插画用neko_life_draw_scene，不附人物图。"
-                "参考图不可用时如实说明，不退回纯文生图或声称已参考。自然语言、标签或混合描述均可。"
+                "仅当前用户确实要求画图时才使用生图工具；历史提及、闲聊和取消不算。"
+                "画你自己、你的自拍、自画像或以你为主角用neko_draw并设use_self_reference=true，"
+                "插件附管理员角色参考图，不必先调用query_memory，prompt只写本次场景、动作、服装或画风，不编造消息ID或文件路径。"
+                "修改用户指定聊天原图用neko_edit_image；需要机器人外貌时同样设use_self_reference=true，保留聊天原图并追加角色参考。"
+                "用户自拍、其他人物、无人场景和Life插画不附角色参考。参考图不可用时如实说明，不退回纯文生图。"
             )
         return (
-            "仅当当前用户确实要求生成图片时，以下生图说明才适用；历史提及、闲聊和取消请求不构成生图任务。"
-            "有原图的修改或重绘使用 neko_edit_image，以原图为依据。"
-            "无原图的自画像先调用 query_memory 查询长期记忆中的外貌，再将查到的相关特征用于 neko_draw；未知特征不当作已有记忆，用户要求的新造型作为本次创作设定。"
-            "其他文生图按用户要求调用 neko_draw。自然语言、标签或混合描述均可，不要求固定句式或列全画面要素。"
+            "仅当前用户确实要求画图时才使用生图工具；历史提及、闲聊和取消不算。"
+            "修改聊天原图用neko_edit_image，以原图为依据。"
+            "自画像先调用 query_memory 查长期记忆中的外貌，再把查到的特征用于neko_draw；未知特征不当作已有记忆，用户要求的新造型作为本次设定。"
+            "其他文生图按用户要求调用neko_draw；自然语言、标签或混合描述均可。"
         )
+
+    @staticmethod
+    def _draw_tool_hints(self_reference_enabled: bool) -> Dict[str, Dict[str, str]]:
+        """按当前自画像配置给模型看的工具描述；静态注册文本无法随配置变化，由每轮 hook 改写。"""
+        if self_reference_enabled:
+            return {
+                "neko_draw": {
+                    "description": (
+                        "文生图生成新图。画你自己、自拍或自画像设use_self_reference=true，插件附管理员角色参考图，"
+                        "不必先调用query_memory，prompt只写场景、动作、服装或画风；其他人物、用户自拍、无人场景不设。"
+                        "参考图不可用会明确失败，不退回纯文生图。"
+                    ),
+                    "flag_description": "仅画机器人自己时设true，插件附角色参考图；其他情况保持false，不接受路径或消息ID。",
+                },
+                "neko_edit_image": {
+                    "description": "修改聊天原图。需要机器人角色外貌时设use_self_reference=true：聊天原图在前，角色参考附最后，不替换原图。",
+                    "flag_description": "修改涉及机器人角色并需核对外貌时设true；角色参考附在最后，不替换原图，不把所有人物改成该角色。",
+                },
+            }
+        return {
+            "neko_draw": {
+                "description": (
+                    "文生图生成新图。画你自己或自画像先调用query_memory查长期记忆中的外貌，"
+                    "把查到的特征写进prompt，未知特征不编造；其他图片按用户要求直接生成。"
+                ),
+                "flag_description": "当前未配置角色参考图，保持false；画机器人自己先用query_memory查记忆外貌。",
+            },
+            "neko_edit_image": {
+                "description": "修改聊天原图。当前未配置角色参考图；涉及机器人外貌时先用query_memory查记忆写入prompt。",
+                "flag_description": "当前未配置角色参考图，保持false。",
+            },
+        }
+
+    def _rewrite_draw_tool_hints(self, kwargs: Dict[str, Any]) -> bool:
+        """把neko_draw/neko_edit_image的工具与参数提示改写为当前自画像配置的版本，不动其他工具。"""
+        definitions = kwargs.get("tool_definitions")
+        if not isinstance(definitions, list) or not definitions:
+            return False
+        hints = self._draw_tool_hints(bool(self.config.self_portrait.enabled))
+        rewritten: List[Any] = []
+        changed = False
+        for tool in definitions:
+            function = tool.get("function") if isinstance(tool, dict) else None
+            hint = hints.get(function.get("name")) if isinstance(function, dict) else None
+            if hint is None:
+                rewritten.append(tool)
+                continue
+            new_function = dict(function)
+            new_function["description"] = hint["description"]
+            parameters = function.get("parameters")
+            properties = parameters.get("properties") if isinstance(parameters, dict) else None
+            flag = properties.get("use_self_reference") if isinstance(properties, dict) else None
+            if isinstance(flag, dict):
+                new_parameters = dict(parameters)
+                new_properties = dict(properties)
+                new_flag = dict(flag)
+                new_flag["description"] = hint["flag_description"]
+                new_properties["use_self_reference"] = new_flag
+                new_parameters["properties"] = new_properties
+                new_function["parameters"] = new_parameters
+            rewritten.append({"type": "function", "function": new_function})
+            changed = True
+        if changed:
+            kwargs["tool_definitions"] = rewritten
+        return changed
 
     @Tool(
         "neko_draw",
-        brief_description="生成新图；画机器人自己可用预设角色参考图。",
+        brief_description="文生图生成新图。",
         detailed_description=(
-            "普通文生图；修改聊天中指定图片使用neko_edit_image。"
-            "已配置参考时，画机器人自己/机器人自拍设use_self_reference=true，插件附角色原图，无需查记忆重建外貌；其他人物或用户自拍不设。"
-            "参考不可用明确失败，不改纯文生图冒充；没有配置参考时按当前规划说明处理。"
-            "描述所需主体、效果或风格即可，推荐清楚的自然语言，也接受标签、逗号短语及混合表达，无需列全外貌/场景要素。"
+            "生成全新图片；修改聊天中已有图片用neko_edit_image。"
+            "画机器人自己的提示按当前自画像配置处理：已配置参考图时设use_self_reference=true由插件附图，"
+            "未配置时先用query_memory查记忆中的外貌。"
+            "自然语言、标签或混合描述均可，无需列全画面要素。"
         ),
         parameters=[
             ToolParameterInfo(
                 name="prompt",
                 param_type=ToolParamType.STRING,
-                description="本次主体、场景、动作、服装或画风；参考自画像不必重复编造外貌，自然语言/标签均可",
+                description="主体、场景、动作、服装或画风；自然语言/标签均可",
                 required=True,
             ),
             ToolParameterInfo(name="use_self_reference", param_type=ToolParamType.BOOLEAN,
-                              description="仅画机器人自己时设true；其他人物、用户自拍、无人场景不填。角色图由管理员配置，不接受路径或消息ID。", required=False),
+                              description="是否画机器人自己，按当前自画像配置的说明使用；不接受路径或消息ID。", required=False),
         ],
     )
     @admitted
@@ -1158,20 +1223,19 @@ class NekoDraw(MaiBotPlugin):
 
     @Tool(
         "neko_edit_image",
-        brief_description="修改聊天原图；可额外附机器人角色外貌参考。",
+        brief_description="修改聊天原图。",
         detailed_description=(
             "用户要求修改这张图、换背景、换装、重绘、参考原图时调用。"
             "source_message_id 填当前聊天中图片/表情包或引用消息的真实 ID，也支持上下文短消息编号及工具媒体索引，不能编造。"
-            "普通消息不填source_image_index时保留多图/引用；只想修改某张普通图片时填从0开始的source_image_index。上下文短编号/工具媒体索引默认取第0张，索引不用于emoji表情包。动图只取首帧，不修改整段动画。"
-            "prompt说明修改与保留内容。需要机器人角色外貌时设use_self_reference=true：聊天原图在前，角色参考追加在最后；参考不替换原图，不把所有人物改成该角色。"
-            "默认false不读角色图。最多3张聊天原图加1张参考，超限请用source_image_index明确选原图，不静默丢图。参考或聊天原图不可用均失败，不降级。无需查记忆重建已有视觉依据。"
-            "找不到原图就请用户补发，不要改用文生图冒充图生图。"
+            "普通消息不填source_image_index时保留多图/引用；只想修改某张普通图片时填从0开始的source_image_index。动图只取首帧。"
+            "prompt写修改要求和要保留的内容。需要机器人外貌时按当前自画像配置的use_self_reference说明处理。"
+            "最多3张聊天原图加1张参考；参考或原图不可用均失败不降级，找不到原图就请用户补发，不改用文生图冒充。"
         ),
         parameters=[
             ToolParameterInfo(name="prompt", param_type=ToolParamType.STRING, description="自然语言的修改要求和保留内容", required=True),
             ToolParameterInfo(name="source_message_id", param_type=ToolParamType.STRING, description="当前聊天中的真实消息ID、短消息编号或工具媒体索引", required=True),
             ToolParameterInfo(name="source_image_index", param_type=ToolParamType.INTEGER, description="可选，指定普通图片在源消息中的索引，从0开始；不用于emoji表情包", required=False),
-            ToolParameterInfo(name="use_self_reference", param_type=ToolParamType.BOOLEAN, description="修改涉及机器人角色并需核对外貌时设true；保留聊天原图并在末尾附角色参考。用户自拍/其他人物默认false，不填本地路径。", required=False),
+            ToolParameterInfo(name="use_self_reference", param_type=ToolParamType.BOOLEAN, description="修改涉及机器人角色外貌时按当前自画像配置的说明使用；不填本地路径。", required=False),
         ],
     )
     @admitted

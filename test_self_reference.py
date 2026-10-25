@@ -201,3 +201,42 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.module,'resolve_edit_images',AsyncMock(return_value=[image_bytes('PNG')])),patch.object(self.module.asyncio,'to_thread',side_effect=cancel):
             with self.assertRaises(asyncio.CancelledError):await self.bot.edit_image('edit','source',use_self_reference=True,stream_id='chat')
         self.bot._start_task.assert_not_called()
+
+    @staticmethod
+    def _tool_definitions():
+        def entry(name, flag_text='flag'):
+            properties = {'use_self_reference': {'type': 'boolean', 'description': flag_text}} if flag_text else {}
+            return {'type': 'function', 'function': {'name': name, 'description': 'registered', 'parameters': {'type': 'object', 'properties': properties}}}
+        return [entry('reply'), entry('neko_draw'), entry('neko_edit_image'), entry('neko_draw_status', None)]
+
+    async def test_tool_hints_follow_self_reference_switch(self):
+        definitions = self._tool_definitions()
+        result = await self.bot.configure_planner(session_id='chat', items=[], tool_definitions=definitions)
+        payload = result['modified_kwargs']['tool_definitions']
+        by_name = {tool['function']['name']: tool['function'] for tool in payload}
+        self.assertIn('不必先调用query_memory', by_name['neko_draw']['description'])
+        self.assertIn('use_self_reference=true', by_name['neko_draw']['description'])
+        self.assertIn('角色参考附最后', by_name['neko_edit_image']['description'])
+        self.assertIn('设true，插件附角色参考图', by_name['neko_draw']['parameters']['properties']['use_self_reference']['description'])
+        self.assertEqual(by_name['reply']['description'], 'registered')
+        self.assertEqual(by_name['neko_draw_status']['description'], 'registered')
+        self.assertNotIn('query_memory', by_name['neko_edit_image']['parameters']['properties']['use_self_reference']['description'])
+
+    async def test_tool_hints_without_reference_return_to_memory_guidance(self):
+        self.bot.config.self_portrait.enabled = False
+        definitions = self._tool_definitions()
+        result = await self.bot.configure_planner(session_id='chat', items=[], tool_definitions=definitions)
+        by_name = {tool['function']['name']: tool['function'] for tool in result['modified_kwargs']['tool_definitions']}
+        self.assertIn('先调用query_memory查长期记忆中的外貌', by_name['neko_draw']['description'])
+        self.assertIn('未配置角色参考图', by_name['neko_draw']['parameters']['properties']['use_self_reference']['description'])
+        self.assertIn('保持false', by_name['neko_edit_image']['parameters']['properties']['use_self_reference']['description'])
+        self.assertNotIn('use_self_reference=true', by_name['neko_draw']['description'])
+        self.assertEqual(by_name['reply']['description'], 'registered')
+
+    async def test_disabled_plugin_and_foreign_definitions_are_left_alone(self):
+        definitions = self._tool_definitions()
+        result = await self.bot.configure_planner(session_id='chat', items=[], tool_definitions=definitions)
+        self.assertEqual([tool['function']['description'] for tool in result['modified_kwargs']['tool_definitions']
+                          if tool['function']['name'] not in ('neko_draw', 'neko_edit_image')], ['registered', 'registered'])
+        self.bot.config.plugin.enabled = False
+        self.assertIsNone(await self.bot.configure_planner(session_id='chat', items=[], tool_definitions=self._tool_definitions()))
