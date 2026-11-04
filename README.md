@@ -85,7 +85,7 @@ MaiBot 生图插件，只保留两条路：
 ## 安装
 
 ```bash
-git clone https://github.com/znzsofficial/neko-draw.git plugins/neko-draw
+git clone https://github.com/RoselindLabs/neko-draw.git plugins/neko-draw
 ```
 
 MaiBot 1.3.6+，插件 SDK 2.12+。许可证是 MIT。
