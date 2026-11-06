@@ -372,12 +372,12 @@ class NekoDraw(MaiBotPlugin):
         if text.startswith("http://") or text.startswith("https://"):
             return await self._download(text, proxy)
         compact = re.sub(r"\s+", "", text)
-        if len(compact) > 200 and re.fullmatch(r"[A-Za-z0-9+/=]+", compact):
+        if (len(compact) > 200 or compact.startswith(('R0lGODdh', 'R0lGODlh'))) and re.fullmatch(r"[A-Za-z0-9+/=]+", compact):
             try:
                 decoded = await image_work(decode_image, compact)
             except Exception:
                 return None
-            if decoded.startswith(b"\x89PNG") or decoded.startswith(b"\xff\xd8") or decoded.startswith(b"RIFF"):
+            if decoded.startswith((b"\x89PNG", b"\xff\xd8", b"RIFF", b"GIF87a", b"GIF89a")):
                 return decoded
         return None
 

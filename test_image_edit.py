@@ -104,12 +104,13 @@ class Sources(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 await resolve_context_image(ctx, 'chat', 'media')
 
-    async def test_context_gif_is_normalized_and_cancellation_propagates(self):
+    async def test_context_gif_is_preserved_and_cancellation_propagates(self):
         ctx = types.SimpleNamespace(call_capability=AsyncMock(return_value={
             'success': True, 'image': {'binary_data_base64': base64.b64encode(animation('GIF')).decode()}}))
         images = await resolve_context_image(ctx, 'chat', 'media')
+        self.assertEqual(images, [animation('GIF')])
         with Image.open(io.BytesIO(images[0])) as image:
-            self.assertEqual(image.format, 'PNG')
+            self.assertEqual(image.format, 'GIF')
             self.assertEqual(image.convert('RGB').getpixel((0, 0)), (255, 0, 0))
         ctx.call_capability.side_effect = asyncio.CancelledError()
         with self.assertRaises(asyncio.CancelledError):
@@ -140,8 +141,8 @@ class Sources(unittest.IsolatedAsyncioTestCase):
         m['message_segments'] += sticker()['raw_message']
         self.assertEqual(extract(m), [PNG])
 
-    def test_gif_webp_and_apng_sticker_use_first_static_frame(self):
-        for fmt in ['GIF', 'WEBP', 'PNG']:
+    def test_webp_and_apng_sticker_use_first_static_frame(self):
+        for fmt in ['WEBP', 'PNG']:
             data = animation(fmt)
             result = extract(sticker(data))[0]
             with Image.open(io.BytesIO(result)) as image:
@@ -149,12 +150,13 @@ class Sources(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(getattr(image, 'n_frames', 1), 1)
                 self.assertEqual(image.convert('RGB').getpixel((0, 0)), (255, 0, 0))
 
-    def test_gif_delivered_as_image_is_also_normalized(self):
+    def test_gif_delivered_as_image_is_preserved(self):
         m = sticker(animation('GIF'))
         m['raw_message'][0]['type'] = 'image'
         result = extract(m)[0]
+        self.assertEqual(result, animation('GIF'))
         with Image.open(io.BytesIO(result)) as image:
-            self.assertEqual(image.format, 'PNG')
+            self.assertEqual(image.format, 'GIF')
             self.assertEqual(image.convert('RGB').getpixel((0, 0)), (255, 0, 0))
 
     def test_apng_default_poster_is_not_first_animation_frame(self):
@@ -230,7 +232,7 @@ class Sources(unittest.IsolatedAsyncioTestCase):
         with patch('source_images.MAX_PIXELS', 1):
             with self.assertRaises(ValueError):
                 normalize_source_image(animation('GIF'))
-        data = animation('GIF')
+        data = animation('PNG')
         with patch('source_images.MAX_BYTES', len(data)), patch.object(Image.Image, 'save', side_effect=lambda out, **kw: out.write(b'x' * (len(data) + 1))):
             with self.assertRaises(ValueError):
                 normalize_source_image(data)
@@ -332,7 +334,7 @@ class Providers(unittest.IsolatedAsyncioTestCase):
         args = start.call_args.args
         self.assertEqual(args[:3], ('chat', '换背景，保留人物', 'user'))
         with Image.open(io.BytesIO(args[3][0])) as image:
-            self.assertEqual(image.format, 'PNG')
+            self.assertEqual(image.format, 'GIF')
             self.assertEqual(image.convert('RGB').getpixel((0, 0)), (255, 0, 0))
 
     async def test_edit_tool_submits_selected_context_image_without_generation(self):

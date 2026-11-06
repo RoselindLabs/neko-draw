@@ -28,6 +28,7 @@ required = {
     "test_focus_scope",
     "test_package",
     "test_image_edit",
+    "test_gif",
     "test_self_reference",
 }
 if not required <= groups:

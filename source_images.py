@@ -8,8 +8,10 @@ from collections import OrderedDict
 from PIL import Image
 try:
     from .resource_budget import image_work
+    from .result_images import validate_gif
 except ImportError:  # Standalone offline tests.
     from resource_budget import image_work
+    from result_images import validate_gif
 
 MAX_BYTES = 10 * 1024 * 1024
 MAX_IMAGES = 4
@@ -83,20 +85,22 @@ class ImageCache:
 
 
 def mime_type(data):
+    if data.startswith((b'GIF87a', b'GIF89a')):
+        return 'image/gif'
     if data.startswith(b'\x89PNG\r\n\x1a\n'):
         return 'image/png'
     if data.startswith(b'\xff\xd8\xff'):
         return 'image/jpeg'
     if data.startswith(b'RIFF') and data[8:12] == b'WEBP':
         return 'image/webp'
-    raise ValueError('源图需要 PNG、JPEG 或 WebP 格式')
+    raise ValueError('源图需要 PNG、JPEG、WebP 或 GIF 格式')
 
 
 def normalize_source_image(data):
-    """Validate image/sticker pixels; animation becomes one static PNG frame.
+    """Validate image/sticker pixels; preserve fully validated GIF bytes.
 
     Never interpret emoji descriptions, Unicode faces or QQ face IDs as images.
-    Only the first animation frame is decoded (skip APNG's separate poster).
+    Other animations still use their first frame (skip APNG's separate poster).
     """
     if not data or len(data) > MAX_BYTES:
         raise ValueError('单张源图不能为空或超过 10 MiB')
@@ -108,7 +112,10 @@ def normalize_source_image(data):
                     raise ValueError('源图需要 PNG、JPEG、WebP 或 GIF 格式')
                 if image.width * image.height > MAX_PIXELS:
                     raise ValueError('源图不能超过 4000 万像素')
-                if image.format == 'GIF' or getattr(image, 'is_animated', False):
+                if image.format == 'GIF':
+                    validate_gif(data, image)
+                    return data
+                if getattr(image, 'is_animated', False):
                     image.seek(1 if image.format == 'PNG' and image.info.get('default_image') else 0)
                     output = io.BytesIO()
                     image.convert('RGBA').save(output, format='PNG')
