@@ -332,10 +332,15 @@ class Providers(unittest.IsolatedAsyncioTestCase):
         result = await self.mod.NekoDraw.edit_image(self.admission_fixture(bot), prompt='换背景，保留人物', source_message_id='sticker', user_id='user')
         self.assertTrue(result['success'])
         args = start.call_args.args
-        self.assertEqual(args[:3], ('chat', '换背景，保留人物', 'user'))
+        self.assertEqual(args[:3], ('chat', '换背景，保留人物\n高分辨率高帧', 'user'))
         with Image.open(io.BytesIO(args[3][0])) as image:
             self.assertEqual(image.format, 'GIF')
             self.assertEqual(image.convert('RGB').getpixel((0, 0)), (255, 0, 0))
+
+        start.reset_mock()
+        result = await self.mod.NekoDraw.edit_image(bot, prompt='高分辨率高帧，保留人物', source_message_id='sticker')
+        self.assertTrue(result['success'])
+        self.assertEqual(start.call_args.args[1], '高分辨率高帧，保留人物')
 
     async def test_edit_tool_submits_selected_context_image_without_generation(self):
         start = Mock(return_value=types.SimpleNamespace(summary=lambda: 'submitted'))
