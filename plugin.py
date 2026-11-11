@@ -89,7 +89,11 @@ class CommandConfig(PluginConfigBase):
 
     allowed_user_ids: List[str] = Field(
         default_factory=list,
-        description="允许使用 /draw 的 QQ 号。留空时命令不生效",
+        description="仅允许使用 /draw 的 QQ 号。留空时 QQ 命令不生效",
+    )
+    allowed_telegram_user_ids: List[str] = Field(
+        default_factory=list,
+        description="允许使用 /draw 的 Telegram 数字用户 ID；独立于 QQ，留空时 Telegram 命令不生效",
     )
 
 
@@ -1162,6 +1166,7 @@ class NekoDraw(MaiBotPlugin):
 
     @Tool(
         "neko_draw",
+        trusted_context="neko.tools.context.v1",
         brief_description="文生图生成新图。",
         detailed_description=(
             "生成全新图片；修改聊天中已有图片用neko_edit_image。"
@@ -1180,8 +1185,14 @@ class NekoDraw(MaiBotPlugin):
                               description="是否画机器人自己，按当前自画像配置的说明使用；不接受路径或消息ID。", required=False),
         ],
     )
-    @admitted
     async def draw(self, prompt: str = "", use_self_reference: bool = False, **kwargs: Any) -> Dict[str, Any]:
+        identity = self._tool_identity(kwargs.get("_host_context"))
+        if identity is None:
+            return {"success": False, "content": "可信聊天身份缺失或矛盾，本次未提交。"}
+        return await self._draw(prompt, use_self_reference, **identity)
+
+    @admitted
+    async def _draw(self, prompt: str = "", use_self_reference: bool = False, **kwargs: Any) -> Dict[str, Any]:
         generation = self._generation_id()
         if not isinstance(prompt, str) or type(use_self_reference) is not bool:
             return {"success": False, "content": "提示词或自画像参考参数无效"}
@@ -1223,6 +1234,7 @@ class NekoDraw(MaiBotPlugin):
 
     @Tool(
         "neko_edit_image",
+        trusted_context="neko.tools.context.v1",
         brief_description="修改聊天原图或GIF动图。",
         detailed_description=(
             "用户要求修改这张图、换背景、换装、重绘、参考原图时调用。"
@@ -1238,8 +1250,14 @@ class NekoDraw(MaiBotPlugin):
             ToolParameterInfo(name="use_self_reference", param_type=ToolParamType.BOOLEAN, description="修改涉及机器人角色外貌时按当前自画像配置的说明使用；不填本地路径。", required=False),
         ],
     )
-    @admitted
     async def edit_image(self, prompt: str = "", source_message_id: str = "", source_image_index: int | None = None, use_self_reference: bool = False, **kwargs: Any) -> Dict[str, Any]:
+        identity = self._tool_identity(kwargs.get("_host_context"))
+        if identity is None:
+            return {"success": False, "content": "可信聊天身份缺失或矛盾，本次未提交。"}
+        return await self._edit_image(prompt, source_message_id, source_image_index, use_self_reference, **identity)
+
+    @admitted
+    async def _edit_image(self, prompt: str = "", source_message_id: str = "", source_image_index: int | None = None, use_self_reference: bool = False, **kwargs: Any) -> Dict[str, Any]:
         generation = self._generation_id()
         if not isinstance(prompt, str) or not isinstance(source_message_id, str) or type(use_self_reference) is not bool:
             return {"success": False, "content": "修改要求、原图编号或自参考参数无效"}
@@ -1287,18 +1305,73 @@ class NekoDraw(MaiBotPlugin):
 
     @Tool(
         "neko_draw_status",
+        trusted_context="neko.tools.context.v1",
         brief_description="查看当前聊天最近一次生图的进度",
         detailed_description="用户问画好了没有、生图进度、上一张图的状态时调用。不要用它开始新的绘图。",
         parameters=[],
     )
     async def draw_status(self, **kwargs: Any) -> Dict[str, Any]:
-        stream_id = self._stream_id(kwargs)
-        if not stream_id:
-            return {"success": False, "content": "找不到当前聊天"}
-        return {"success": True, "content": self._status_text(stream_id)}
+        identity = self._tool_identity(kwargs.get("_host_context"))
+        if identity is None:
+            return {"success": False, "content": "可信聊天身份缺失或矛盾。"}
+        return {"success": True, "content": self._status_text(identity["stream_id"])}
 
-    def _allowed(self, user_id: str) -> bool:
-        allowed = {str(item).strip() for item in self.config.command.allowed_user_ids if str(item).strip()}
+    @staticmethod
+    def _tool_identity(context):
+        # Host must overwrite this envelope for every opt-in invocation. Ordinary
+        # model kwargs (including message/stream_id) never supply identity or bytes.
+        if not isinstance(context, dict) or context.get("contract") != "neko.tools.context.v1":
+            return None
+        session = context.get("session_id")
+        if (not isinstance(session, str) or not 0 < len(session) <= 256 or session != session.strip()
+                or any(ord(c) < 32 for c in session) or context.get("stream_id") != session):
+            return None
+        # Tools are session-scoped, not command-whitelist scoped. Normal and
+        # Focus Host contexts have no anchor and therefore may have no account.
+        keys = ("session_id", "stream_id", "platform", "account_id", "group_id", "user_id")
+        return {key: context.get(key, "") for key in keys}
+
+    def _command_identity(self, stream_id, user_id, kwargs):
+        # Command args are Host-produced, not LLM arguments. Cross-check against
+        # the actual inbound message, which also supplies the receiving account.
+        message = kwargs.get("message")
+        if not isinstance(message, dict):
+            return None
+        info = message.get("message_info")
+        if not isinstance(info, dict) or not isinstance(info.get("user_info"), dict):
+            return None
+        group = info.get("group_info") or {}
+        if not isinstance(group, dict):
+            return None
+        context = dict(contract="neko.tools.context.v1", session_id=message.get("session_id"),
+                       stream_id=stream_id, platform=message.get("platform"), account_id=message.get("account_id"),
+                       user_id=info["user_info"].get("user_id"), group_id=group.get("group_id", ""))
+        identity = self._tool_identity(context)
+        if identity is None:
+            return None
+        if any(not isinstance(value, str) or value != value.strip() or len(value) > 256
+               or any(ord(c) < 32 for c in value) for value in identity.values()):
+            return None
+        if (identity["platform"] not in ("qq", "telegram") or not identity["account_id"]
+                or not user_id or identity["user_id"] != user_id
+                or identity["platform"] != kwargs.get("platform")
+                or identity["group_id"] != kwargs.get("group_id", "")):
+            return None
+        for key in ("session_id", "account_id", "chat_id"):
+            if key in kwargs and kwargs[key] != identity["session_id" if key == "chat_id" else key]:
+                return None
+        return identity
+
+    def _allowed(self, user_id: str, platform: str) -> bool:
+        if platform == "qq":
+            values = self.config.command.allowed_user_ids
+        elif platform == "telegram":
+            values = self.config.command.allowed_telegram_user_ids
+            if re.fullmatch(r"[1-9][0-9]{0,19}", user_id) is None:
+                return False
+        else:
+            return False
+        allowed = {str(item).strip() for item in values if str(item).strip()}
         return bool(user_id) and user_id in allowed
 
     @Command(
@@ -1313,8 +1386,11 @@ class NekoDraw(MaiBotPlugin):
         matched_groups: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> Tuple[bool, str, bool]:
-        sender = str(user_id or kwargs.get("user_id") or "").strip()
-        if not self._allowed(sender):
+        identity = self._command_identity(stream_id, user_id, kwargs)
+        if identity is None:
+            return False, "可信聊天身份缺失或矛盾", True
+        sender = identity["user_id"]
+        if not self._allowed(sender, identity["platform"]):
             self.ctx.logger.info("拒绝 /draw：用户 %s 不在白名单", sender or "未知")
             return False, "生图命令未对你开放", True
         if not stream_id:
@@ -1326,14 +1402,14 @@ class NekoDraw(MaiBotPlugin):
         if parts[0].lower() in {"edit", "图生图", "改图"}:
             if len(parts) < 2:
                 return False, "请引用原图，发送 /draw edit <修改要求>", True
-            result = await self.edit_image(prompt=parts[1], stream_id=stream_id, user_id=sender, **kwargs)
+            result = await self._edit_image(prompt=parts[1], message=kwargs.get("message"), **identity)
             return bool(result["success"]), str(result["content"]), True
         if not self.config.plugin.enabled:
             return False, "生图插件未启用", True
         active = self._active_task(stream_id)
         if active is not None:
             return False, "上一张还没画完。\n" + active.summary(), True
-        result = await self.draw(prompt=payload, stream_id=stream_id, user_id=sender)
+        result = await self._draw(prompt=payload, **identity)
         return bool(result['success']), result['content'], True
 
 

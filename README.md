@@ -1,5 +1,13 @@
 # Neko 生图
 
+## 1.4.9：可信身份与平台命令名单
+
+三个工具（`neko_draw`、`neko_edit_image`、`neko_draw_status`）要求维护 Host 的 `neko.tools.context.v1` opt-in 补丁：Host 必须覆盖模型传入的 `_host_context`，提供非空且一致的 `session_id`/`stream_id`；缺失契约、空会话或矛盾会话直接拒绝，普通 kwargs 中的身份、消息/图片不能覆盖该信封。工具按可信会话隔离，不以平台或账号字段授权；普通和共享 Focus 路径没有消息锚点时，Host 的空 `account_id` 是合法形状，不猜账号或借用其他会话。仅安装官方 SDK 不代表 Host 已具备补丁。
+
+`command.allowed_user_ids` 仍只授权 QQ；新增 `command.allowed_telegram_user_ids=[]` 仅授权明确列出的 Telegram 数字用户 ID，默认关闭 TG 命令，同号不会跨平台继承。命令使用 Host 入站参数与消息交叉核对平台、会话、发送者和账号；工具调用仍不受命令白名单限制。`/draw@bot` 的目标机器人校验与后缀归一化由 Telegram 适配器负责，本插件不直接接受任意后缀。
+
+共享 Focus 仅解析首个 text part 偏移0的合法 Host 前缀行，允许同段接正文；完整属性、消息来源和作用域仍校验，不扫描正文寻找伪造前缀。供应商、额度、缓存及 unknown 不重发规则保持。
+
 1.4.7：GIF原始输入与输出。聊天图片/表情包中的GIF经完整数据块检查和逐帧解码后保留原字节（帧、时长、循环等不重编码），images/edits multipart、chat data URL和既有Gemini inlineData使用`image/gif`；结果的裸Base64（包括小图）、data URL及公网URL均支持GIF，最终send.image前再次校验并发送原字节。沿用现有接口、模型及配置，供应商是否接受/输出动画仍取决于当前接口能力。
 
 GIF最多200帧、累计4000万解码像素（按每帧完整画布累计），在解码前检查结构及预算，再逐帧load拒绝损坏后续帧；沿用2个image_work线程位和原取消语义。输入10MiB、结果16MiB、响应32MiB上限不变。HTTP200后的无效/超预算GIF仍为unknown，不重试生成或切路由。其他动画WebP/APNG源图仍仅取首帧，管理员自画像参考仍仅接受静态PNG/JPEG/WebP。离线合成GIF回归覆盖原字节、元数据、MIME、响应路径、发送、坏帧及预算；未调用真实模型或QQ。宿主若入站压缩/上下文取图已转静态，插件无法恢复动画；send.image原字节交接成功不等于QQ客户端动画展示验收。
@@ -139,6 +147,8 @@ python scripts/package.py
 # 可选：输出到尚不存在的路径，不创建 GitHub Release
 python scripts/package.py --output neko-draw.zip
 ```
+
+工具身份回归默认使用普通/Focus 无锚点的真实形状夹具（`account_id=""`）。需要维护 Host 集成验证时，在其依赖环境运行 `python scripts/verify_host_context.py --host-source <Host源码目录> --temp-dir <临时目录> --report <报告.json>`：使用真实普通/Focus 上下文构造、SDK metadata 与 Host 信封覆盖，再进入三个插件工具；QQ/TG 群私共24条路径及伪造/缺失会话拒绝均离线验证。脚本只在新临时实例初始化 Host，禁止网络并替换生图/发送入口，不依赖本机固定源码路径；不代表真实生成或客户端送达。
 
 门禁要求关键权限/公网传输/编辑/去重/共享Focus/打包测试组实际被发现并成功执行，0意外skip、0失败；不用固定总用例数证明正确。纯根目录/docs下Markdown只查本地链接，不获得源码发布资格；源码发布仍须同main提交及实际通过的核心测试/包验证/ci-gate/publish-gate。受控手动验证同HEAD可用于文档HEAD发版，不做空提交；不部署或执行真实模型/QQ操作。
 `tzdata` 显式安装，避免Windows与Linux时区数据库差异。新增公网下载回归全部使用MockTransport/假会话：

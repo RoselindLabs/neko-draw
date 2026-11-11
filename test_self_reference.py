@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from PIL import Image
 from self_reference import read_reference, MAX_REFERENCE_BYTES, portrait_prompt
+from test_tool_context import tool_context
 
 
 def image_bytes(fmt='JPEG'):
@@ -74,7 +75,7 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
         self.bot._start_task=Mock(return_value=types.SimpleNamespace(summary=lambda:'queued'))
 
     async def test_explicit_reference_attaches_original_and_uses_edit_path(self):
-        result=await self.bot.draw(prompt='在窗边读书的自画像',use_self_reference=True,stream_id='chat')
+        result=await self.bot.draw(prompt='在窗边读书的自画像',use_self_reference=True,_host_context=tool_context())
         self.assertTrue(result['success'])
         self.assertIn('已附角色参考图',result['content'])
         args=self.bot._start_task.call_args.args
@@ -83,14 +84,14 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_normal_drawing_never_reads_reference_or_attaches_it(self):
         with patch.object(self.module,'read_reference',side_effect=AssertionError('ordinary drawing must not read')):
-            result=await self.bot.draw(prompt='无人环境',stream_id='chat')
+            result=await self.bot.draw(prompt='无人环境',_host_context=tool_context())
         self.assertTrue(result['success']);self.assertEqual(len(self.bot._start_task.call_args.args),3)
 
     async def test_missing_or_disabled_reference_denies_without_text_fallback(self):
         for disabled in [False,True]:
             self.bot.config.self_portrait.enabled=not disabled
             self.bot.config.self_portrait.reference_path=str(self.path)+'-missing'
-            result=await self.bot.draw(prompt='self portrait',use_self_reference=True,stream_id='chat')
+            result=await self.bot.draw(prompt='self portrait',use_self_reference=True,_host_context=tool_context())
             self.assertFalse(result['success'])
         self.bot._start_task.assert_not_called()
 
@@ -101,21 +102,21 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
             self.bot.config.self_portrait.enabled=False
             return value
         with patch.object(self.module.asyncio,'to_thread',side_effect=change):
-            result=await self.bot.draw(prompt='self portrait',use_self_reference=True,stream_id='chat')
+            result=await self.bot.draw(prompt='self portrait',use_self_reference=True,_host_context=tool_context())
         self.assertFalse(result['success']);self.bot._start_task.assert_not_called()
 
     async def test_racing_active_task_after_file_read_does_not_start(self):
         self.bot._active_task=Mock(side_effect=[None,types.SimpleNamespace(summary=lambda:'running')])
-        result=await self.bot.draw(prompt='self portrait',use_self_reference=True,stream_id='chat')
+        result=await self.bot.draw(prompt='self portrait',use_self_reference=True,_host_context=tool_context())
         self.assertFalse(result['success']);self.bot._start_task.assert_not_called()
 
     async def test_invalid_bool_and_cancellation_do_not_generate(self):
         for value in ['true',1,None]:
-            self.assertFalse((await self.bot.draw('self',use_self_reference=value,stream_id='chat'))['success'])
+            self.assertFalse((await self.bot.draw('self',use_self_reference=value,_host_context=tool_context()))['success'])
         async def cancel(*args):raise asyncio.CancelledError
         with patch.object(self.module.asyncio,'to_thread',side_effect=cancel):
             with self.assertRaises(asyncio.CancelledError):
-                await self.bot.draw('self',use_self_reference=True,stream_id='chat')
+                await self.bot.draw('self',use_self_reference=True,_host_context=tool_context())
         self.bot._start_task.assert_not_called()
 
     async def test_planner_prefers_reference_without_path_or_memory_prerequisite(self):
@@ -137,7 +138,7 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_edit_appends_reference_and_preserves_source_order(self):
         sources=[image_bytes('PNG'),image_bytes('WEBP')]
         with patch.object(self.module,'resolve_edit_images',AsyncMock(return_value=sources)) as resolve:
-            result=await self.bot.edit_image('把我换成机器人角色，保留背景','source',use_self_reference=True,stream_id='chat')
+            result=await self.bot.edit_image('把我换成机器人角色，保留背景','source',use_self_reference=True,_host_context=tool_context())
         self.assertTrue(result['success'])
         args=self.bot._start_task.call_args.args
         self.assertEqual(args[3],[*sources,self.data]);self.assertEqual(sources,[image_bytes('PNG'),image_bytes('WEBP')])
@@ -147,7 +148,7 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_ordinary_edit_does_not_read_or_append_reference(self):
         with patch.object(self.module,'resolve_edit_images',AsyncMock(return_value=[image_bytes('PNG')])),patch.object(self.module,'read_reference',side_effect=AssertionError('must not read')):
-            result=await self.bot.edit_image('仅改背景','source',stream_id='chat')
+            result=await self.bot.edit_image('仅改背景','source',_host_context=tool_context())
         self.assertTrue(result['success']);self.assertEqual(self.bot._start_task.call_args.args[1],'仅改背景')
         self.assertEqual(self.bot._start_task.call_args.args[3],[image_bytes('PNG')])
 
@@ -155,28 +156,28 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
         for value in [[],ValueError('missing source')]:
             resolver=AsyncMock(side_effect=value) if isinstance(value,Exception) else AsyncMock(return_value=value)
             with patch.object(self.module,'resolve_edit_images',resolver),patch.object(self.module,'read_reference',side_effect=AssertionError('no source no reference')):
-                result=await self.bot.edit_image('edit','source',use_self_reference=True,stream_id='chat')
+                result=await self.bot.edit_image('edit','source',use_self_reference=True,_host_context=tool_context())
             self.assertFalse(result['success'])
         self.bot._start_task.assert_not_called()
 
     async def test_edit_four_sources_rejected_without_dropping_any(self):
         sources=[image_bytes('PNG')]*4
         with patch.object(self.module,'resolve_edit_images',AsyncMock(return_value=sources)),patch.object(self.module,'read_reference',side_effect=AssertionError('over limit')):
-            result=await self.bot.edit_image('edit','source',use_self_reference=True,stream_id='chat')
+            result=await self.bot.edit_image('edit','source',use_self_reference=True,_host_context=tool_context())
         self.assertFalse(result['success']);self.assertIn('source_image_index',result['content']);self.assertEqual(len(sources),4)
         self.bot._start_task.assert_not_called()
 
     async def test_edit_three_sources_plus_reference_is_four(self):
         with patch.object(self.module,'resolve_edit_images',AsyncMock(return_value=[image_bytes('PNG')]*3)):
-            result=await self.bot.edit_image('edit','source',use_self_reference=True,stream_id='chat')
+            result=await self.bot.edit_image('edit','source',use_self_reference=True,_host_context=tool_context())
         self.assertTrue(result['success']);self.assertEqual(len(self.bot._start_task.call_args.args[3]),4)
 
     async def test_edit_invalid_or_disabled_reference_has_no_fallback(self):
         with patch.object(self.module,'resolve_edit_images',AsyncMock(return_value=[image_bytes('PNG')])):
             self.bot.config.self_portrait.reference_path+='-missing'
-            self.assertFalse((await self.bot.edit_image('edit','source',use_self_reference=True,stream_id='chat'))['success'])
+            self.assertFalse((await self.bot.edit_image('edit','source',use_self_reference=True,_host_context=tool_context()))['success'])
             self.bot.config.self_portrait.enabled=False
-            self.assertFalse((await self.bot.edit_image('edit','source',use_self_reference=True,stream_id='chat'))['success'])
+            self.assertFalse((await self.bot.edit_image('edit','source',use_self_reference=True,_host_context=tool_context()))['success'])
         self.bot._start_task.assert_not_called()
 
     async def test_edit_reference_reconfigured_or_plugin_disabled_during_read(self):
@@ -189,17 +190,17 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
                 else:self.bot.config.plugin.enabled=False
                 return result
             with patch.object(self.module,'resolve_edit_images',AsyncMock(return_value=[image_bytes('PNG')])),patch.object(self.module.asyncio,'to_thread',side_effect=change):
-                self.assertFalse((await self.bot.edit_image('edit','source',use_self_reference=True,stream_id='chat'))['success'])
+                self.assertFalse((await self.bot.edit_image('edit','source',use_self_reference=True,_host_context=tool_context()))['success'])
         self.bot._start_task.assert_not_called()
 
     async def test_edit_cancellation_and_invalid_parameters_never_start(self):
         with patch.object(self.module,'resolve_edit_images',AsyncMock()) as resolve:
             for value in ['true',1,None]:
-                self.assertFalse((await self.bot.edit_image('edit','source',use_self_reference=value,stream_id='chat'))['success'])
+                self.assertFalse((await self.bot.edit_image('edit','source',use_self_reference=value,_host_context=tool_context()))['success'])
             resolve.assert_not_called()
         async def cancel(*args):raise asyncio.CancelledError
         with patch.object(self.module,'resolve_edit_images',AsyncMock(return_value=[image_bytes('PNG')])),patch.object(self.module.asyncio,'to_thread',side_effect=cancel):
-            with self.assertRaises(asyncio.CancelledError):await self.bot.edit_image('edit','source',use_self_reference=True,stream_id='chat')
+            with self.assertRaises(asyncio.CancelledError):await self.bot.edit_image('edit','source',use_self_reference=True,_host_context=tool_context())
         self.bot._start_task.assert_not_called()
 
     @staticmethod

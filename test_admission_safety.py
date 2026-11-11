@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import aiohttp
 
 from test_life_authorization import packet
+from test_tool_context import tool_context
 
 
 ROOT = Path(__file__).parent
@@ -136,8 +137,8 @@ class Safety(unittest.IsolatedAsyncioTestCase):
                 self.bot._generate = AsyncMock()
                 self.bot._send = AsyncMock()
                 with patch.object(mod, 'resolve_edit_images', side_effect=barrier if entry == 'edit' else AsyncMock(return_value=[b'source'])), patch.object(mod, 'image_work', side_effect=barrier):
-                    call = (self.bot.draw(prompt='prompt', use_self_reference=True, stream_id='chat')
-                            if entry == 'portrait' else self.bot.edit_image(prompt='prompt', stream_id='chat', use_self_reference=entry == 'edit-portrait'))
+                    call = (self.bot.draw(prompt='prompt', use_self_reference=True, _host_context=tool_context())
+                            if entry == 'portrait' else self.bot.edit_image(prompt='prompt', _host_context=tool_context(), use_self_reference=entry == 'edit-portrait'))
                     pending = asyncio.create_task(call)
                     await entered.wait()
                     await self.bot.on_config_update('', {}, 'test')
@@ -188,7 +189,7 @@ class Safety(unittest.IsolatedAsyncioTestCase):
             with patch.object(mod.asyncio, 'to_thread', side_effect=barrier):
                 pending = asyncio.create_task(self.bot.life_v1(packet=value))
                 await entered.wait()
-                self.assertFalse((await self.bot.draw(prompt='ordinary', stream_id='chat'))['success'])
+                self.assertFalse((await self.bot.draw(prompt='ordinary', _host_context=tool_context()))['success'])
                 release.set()
                 self.assertEqual((await pending)['status'], 'submitted')
             await asyncio.gather(*self.bot._runners.values())
@@ -212,8 +213,8 @@ class Safety(unittest.IsolatedAsyncioTestCase):
                 active -= 1
         self.bot._generate = generate
         self.bot._send = AsyncMock()
-        self.assertFalse((await self.bot.draw(prompt='x' * 4001, stream_id='long'))['success'])
-        results = await asyncio.gather(*(self.bot.draw(prompt='scene', stream_id=f'chat-{i}') for i in range(mod.MAX_ADMITTED + 3)))
+        self.assertFalse((await self.bot.draw(prompt='x' * 4001, _host_context=tool_context('long')))['success'])
+        results = await asyncio.gather(*(self.bot.draw(prompt='scene', _host_context=tool_context(f'chat-{i}')) for i in range(mod.MAX_ADMITTED + 3)))
         self.assertEqual(sum(r['success'] for r in results), mod.MAX_ADMITTED)
         await entered.wait()
         await asyncio.sleep(0)
@@ -233,13 +234,13 @@ class Safety(unittest.IsolatedAsyncioTestCase):
                 entered.set()
             await asyncio.Event().wait()
         with patch.object(mod, 'resolve_edit_images', side_effect=barrier) as resolver:
-            tasks = [asyncio.create_task(self.bot.edit_image(prompt='edit', stream_id=f'chat-{i}'))
+            tasks = [asyncio.create_task(self.bot.edit_image(prompt='edit', _host_context=tool_context(f'chat-{i}')))
                      for i in range(mod.MAX_ADMITTED)]
             try:
                 await asyncio.wait_for(entered.wait(), 2)
                 self.assertFalse(self.bot._runners)
-                self.assertFalse((await self.bot.draw(prompt='scene', stream_id='extra'))['success'])
-                self.assertFalse((await self.bot.edit_image(prompt='edit', stream_id='chat-0'))['success'])
+                self.assertFalse((await self.bot.draw(prompt='scene', _host_context=tool_context('extra')))['success'])
+                self.assertFalse((await self.bot.edit_image(prompt='edit', _host_context=tool_context('chat-0')))['success'])
                 self.assertEqual(resolver.await_count, mod.MAX_ADMITTED)
             finally:
                 for task in tasks:
@@ -277,7 +278,7 @@ class Safety(unittest.IsolatedAsyncioTestCase):
             entered.set()
             await asyncio.Event().wait()
         with patch.object(mod, 'resolve_edit_images', side_effect=barrier):
-            pending = asyncio.create_task(self.bot.edit_image(prompt='edit', stream_id='chat'))
+            pending = asyncio.create_task(self.bot.edit_image(prompt='edit', _host_context=tool_context()))
             await entered.wait()
             pending.cancel()
             with self.assertRaises(asyncio.CancelledError):

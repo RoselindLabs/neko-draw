@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from PIL import Image
+from test_tool_context import tool_context
 
 ROOT = pathlib.Path(__file__).parent
 sys.path.insert(0, str(ROOT))
@@ -315,6 +316,8 @@ class Providers(unittest.IsolatedAsyncioTestCase):
         self.bot = object.__new__(mod.NekoDraw)
 
     def admission_fixture(self, bot):
+        bot._tool_identity = self.mod.NekoDraw._tool_identity
+        bot._edit_image = types.MethodType(self.mod.NekoDraw._edit_image, bot)
         bot._generation_id = lambda: 0
         bot._current = lambda generation: True
         bot._reserve = lambda stream: True
@@ -329,7 +332,7 @@ class Providers(unittest.IsolatedAsyncioTestCase):
             ctx=types.SimpleNamespace(call_capability=AsyncMock(return_value={'message': sticker(animation('GIF'))})),
             _stream_id=lambda kw: 'chat', _active_task=lambda stream: None,
             _image_cache=ImageCache(), _start_task=start, _redact=str)
-        result = await self.mod.NekoDraw.edit_image(self.admission_fixture(bot), prompt='换背景，保留人物', source_message_id='sticker', user_id='user')
+        result = await self.mod.NekoDraw.edit_image(self.admission_fixture(bot), prompt='换背景，保留人物', source_message_id='sticker', _host_context=tool_context(user='user'))
         self.assertTrue(result['success'])
         args = start.call_args.args
         self.assertEqual(args[:3], ('chat', '换背景，保留人物\n高分辨率高帧', 'user'))
@@ -338,7 +341,7 @@ class Providers(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(image.convert('RGB').getpixel((0, 0)), (255, 0, 0))
 
         start.reset_mock()
-        result = await self.mod.NekoDraw.edit_image(bot, prompt='高分辨率高帧，保留人物', source_message_id='sticker')
+        result = await self.mod.NekoDraw.edit_image(bot, prompt='高分辨率高帧，保留人物', source_message_id='sticker', _host_context=tool_context())
         self.assertTrue(result['success'])
         self.assertEqual(start.call_args.args[1], '高分辨率高帧，保留人物')
 
@@ -348,7 +351,7 @@ class Providers(unittest.IsolatedAsyncioTestCase):
         bot = types.SimpleNamespace(config=types.SimpleNamespace(plugin=types.SimpleNamespace(enabled=True)),
                                     ctx=types.SimpleNamespace(call_capability=cap), _stream_id=lambda kw: 'chat',
                                     _active_task=lambda stream: None, _image_cache=ImageCache(), _start_task=start, _redact=str)
-        result = await self.mod.NekoDraw.edit_image(self.admission_fixture(bot), prompt='换背景', source_message_id='tool-media-2', source_image_index=1)
+        result = await self.mod.NekoDraw.edit_image(self.admission_fixture(bot), prompt='换背景', source_message_id='tool-media-2', source_image_index=1, _host_context=tool_context())
         self.assertTrue(result['success'])
         self.assertEqual(start.call_args.args[3], [PNG])
         cap.assert_awaited_once_with('maisaka.context.resolve_image', stream_id='chat', source_id='tool-media-2', index=1)

@@ -26,6 +26,7 @@ required = {
     "test_life_authorization",
     "test_revision_safety",
     "test_focus_scope",
+    "test_tool_context",
     "test_package",
     "test_image_edit",
     "test_gif",

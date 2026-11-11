@@ -138,7 +138,8 @@ class TaskFeedback(unittest.IsolatedAsyncioTestCase):
         self.bot.config.plugin.enabled = False
         self.bot.config.command.allowed_user_ids = ['123']
         self.bot._start_task = Mock()
-        result = await self.bot.cmd_draw(stream_id='chat-a', user_id='123', matched_groups={'payload':'cat'})
+        from test_tool_context import command_context
+        result = await self.bot.cmd_draw(**command_context('chat-a'), matched_groups={'payload':'cat'})
         self.assertFalse(result[0])
         self.bot._start_task.assert_not_called()
         self.assertIsNone(await self.bot.configure_planner(session_id='chat-a', messages=[{'role':'user','content':'帮我画一张图'}]))

@@ -8,7 +8,7 @@ from unittest.mock import Mock
 TREE = ast.parse(pathlib.Path(__file__).with_name('plugin.py').read_text(encoding='utf-8'))
 CLASS = next(n for n in TREE.body if isinstance(n, ast.ClassDef) and n.name == 'NekoDraw')
 NODES = [n for n in CLASS.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-         and n.name in {'draw', 'cmd_draw', '_planner_instruction'}]
+         and n.name in {'_draw', 'cmd_draw', '_planner_instruction'}]
 for node in NODES:
     node.decorator_list = []
     node.returns = None
@@ -18,6 +18,7 @@ for node in NODES:
         node.args.kwarg.annotation = None
 namespace = {'MAX_PROMPT_CHARS': 4000}
 exec(compile(ast.Module(body=NODES, type_ignores=[]), 'plugin.py', 'exec'), namespace)
+namespace['draw'] = namespace['_draw']
 
 
 class PromptSyntaxTests(unittest.IsolatedAsyncioTestCase):
@@ -28,13 +29,14 @@ class PromptSyntaxTests(unittest.IsolatedAsyncioTestCase):
             ctx=types.SimpleNamespace(logger=Mock()),
             _stream_id=lambda kw: kw.get('stream_id', ''),
             _active_task=lambda sid: active,
-            _allowed=lambda sender: allowed,
+            _allowed=lambda sender, platform: allowed,
+            _command_identity=lambda stream, user, kw: dict(stream_id=stream, user_id=user, platform='qq'),
             _status_text=lambda sid: 'status',
             _start_task=Mock(return_value=types.SimpleNamespace(summary=lambda: 'queued')),
         )
         async def draw(**kwargs):
             return await namespace['draw'](bot, **kwargs)
-        bot.draw = draw
+        bot._draw = draw
         return bot
 
     async def test_tags_short_phrases_and_substrings_accepted_by_tool_and_command(self):

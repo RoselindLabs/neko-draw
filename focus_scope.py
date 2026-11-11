@@ -2,6 +2,27 @@
 import html
 import re
 
+HOST_ATTRIBUTES = frozenset({
+    'msg_id', 'session_id', 'chat_name', 'quote', 'time', 'user', 'group_card', 'is_self_message',
+})
+
+
+def host_header(text):
+    """Read only the offset-zero prefix line, even when Host merges body text."""
+    if not isinstance(text, str) or '\n' not in text[:2059]:
+        return None
+    line = text[:2059].partition('\n')[0]
+    prefix = re.fullmatch(r'<message ([^>\r\n]{1,2048})>', line)
+    if not prefix or not re.fullmatch(r'[a-z_]+="[^"<>\r\n]*"(?: [a-z_]+="[^"<>\r\n]*")*', prefix[1]):
+        return None
+    pairs = re.findall(r'([a-z_]+)="([^"]*)"', prefix[1])
+    attrs = dict(pairs)
+    if (len(pairs) != len(attrs) or not attrs.keys() <= HOST_ATTRIBUTES
+            or not attrs.get('msg_id') or not attrs.get('session_id')
+            or ('is_self_message' in attrs and attrs['is_self_message'] != 'true')):
+        return None
+    return attrs
+
 
 def planner_scopes(session_id, definitions):
     if isinstance(session_id, str) and session_id.strip():
@@ -36,11 +57,10 @@ def items_for_scope(items, scope):
             continue
         parts = item.get('parts')
         first = parts[0] if isinstance(parts, list) and parts else None
-        text = first.get('text') if isinstance(first, dict) else None
-        prefix = re.fullmatch(r'<message ([^>]+)>\n', text) if isinstance(text, str) else None
-        if not prefix:
+        text = first.get('text') if isinstance(first, dict) and first.get('type') == 'text' else None
+        attrs = host_header(text)
+        if attrs is None:
             continue
-        attrs = dict(re.findall(r'([a-z_]+)="([^"]*)"', prefix[1]))
         if html.unescape(attrs.get('session_id', '')) == scope and attrs.get('is_self_message') != 'true':
             result.append(item)
     return result

@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 
 import test_admission_safety as fixtures
 from test_life_authorization import packet
+from test_tool_context import tool_context
 
 mod = fixtures.mod
 
@@ -119,7 +120,7 @@ class ReviewSafety(unittest.IsolatedAsyncioTestCase):
             self.bot._reservations['chat'] = (generation, time.monotonic() - 1)
             return [b'source']
         with patch.object(mod, 'resolve_edit_images', side_effect=source):
-            result = await self.bot.edit_image(prompt='edit', stream_id='chat')
+            result = await self.bot.edit_image(prompt='edit', _host_context=tool_context())
         self.assertFalse(result['success'])
         self.assertIn('未提交供应商', result['content'])
         self.assertFalse(self.bot._reservations)
@@ -253,7 +254,7 @@ class ReviewSafety(unittest.IsolatedAsyncioTestCase):
                                for _ in range(mod.MAX_ADMITTED - 1)]
                     await asyncio.sleep(0)
                     self.assertEqual((await self.bot.life_v1(packet=packet(body)))['status'], 'busy')
-                    self.assertFalse((await self.bot.draw(prompt='scene', stream_id='chat'))['success'])
+                    self.assertFalse((await self.bot.draw(prompt='scene', _host_context=tool_context()))['success'])
                     self.assertEqual(calls, 1)
                     for waiter in waiters:
                         waiter.cancel()
