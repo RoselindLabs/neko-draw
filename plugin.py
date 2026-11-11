@@ -161,7 +161,13 @@ def planner_ratio_hints(config) -> tuple[str, str]:
                        "用户指定画幅时先说明无法保证，不把省略说成支持。显式比例/source会在请求前拒绝。")
         return unavailable, unavailable + "改图省略时源比例未应用；角色参考不决定画幅。"
     return ("用户指定画幅优先填aspect_ratio；未指定时按画面主动选择比例。省略沿用配置；chat仅构图建议，不保证尺寸。",
-            "用户指定画幅优先填aspect_ratio；否则省略或source按第一张聊天原图画布匹配最接近比例，角色参考不影响；chat仅构图建议，不保证尺寸。")
+            "用户指定画幅优先填aspect_ratio；否则省略或source按第一张聊天源图画布匹配最接近比例，角色参考不影响；chat仅构图建议，不保证尺寸。")
+
+
+def error_excerpt(text: str, limit: int) -> str:
+    """Bound already-redacted diagnostics without silently hiding the cut."""
+    marker = "…[已截断]"
+    return text if len(text) <= limit else text[:limit - len(marker)] + marker
 
 
 def admitted(method):
@@ -173,7 +179,12 @@ def admitted(method):
         if not self._current(generation):
             return {"success": False, "content": "插件已关闭，本次未提交。"}
         if not self._reserve(stream):
-            return {"success": False, "content": "任务繁忙或全局容量已满，本次未提交，请稍后再试。"}
+            active = self._active_task(stream)
+            if active is not None:
+                return {"success": False, "content": "本聊天已有任务，本次未重复提交；请等待或用neko_draw_status查看进度，不要重复提交。\n" + active.summary()}
+            if stream in self._reservations:
+                return {"success": False, "content": "本聊天已有请求正在准备，本次未重复提交；请等待原请求回执，创建任务后可用neko_draw_status查看进度，不要重复提交。"}
+            return {"success": False, "content": "全局任务容量已满，本次未提交；可稍后按需重新请求。"}
         try:
             return await method(self, *args, **kwargs)
         except AdmissionExpired:
@@ -338,7 +349,7 @@ class DrawTask:
             lines.append(f"画幅请求：{self.aspect_ratio}（{self.aspect_ratio_origin}）；" +
                          (self.aspect_ratio_feedback or "按后端能力映射，chat仅构图建议，不保证尺寸"))
         if self.error:
-            lines.append(f"原因：{self.error[:180]}")
+            lines.append(f"原因：{error_excerpt(self.error, 180)}")
         return "\n".join(lines)
 
 
@@ -383,7 +394,7 @@ class NekoDraw(MaiBotPlugin):
         return True
 
     @HookHandler("chat.receive.before_process", name="neko_source_images",
-                  description="缓存本聊天入站图片/表情包原图供图生图使用", mode=HookMode.OBSERVE)
+                  description="缓存本聊天入站图片/表情包源图供图生图使用", mode=HookMode.OBSERVE)
     async def cache_source_images(self, message: Any = None, stream_id: str = "", **kwargs: Any) -> None:
         generation = self._generation_id()
         if not self.config.plugin.enabled or not isinstance(message, dict):
@@ -1071,25 +1082,33 @@ class NekoDraw(MaiBotPlugin):
         try:
             data = json.loads(text)
         except Exception:
-            return self._redact(text)[:500]
+            return error_excerpt(self._redact(text), 500)
         else:
             # Decode JSON escapes before redaction/truncation; expose only a
             # whitelisted detail, never serialize the supplier's entire object.
-            detail = self._decoded_error_detail(data) or '接口未提供可用错误说明'
+            detail = error_excerpt(self._decoded_error_detail(data) or '接口未提供可用错误说明', 450)
             text = json.dumps({'error': {'message': detail}}, ensure_ascii=False)
-        return self._redact(text)[:500]
+            # Keep the bounded envelope valid JSON so later parsing cannot lose
+            # the useful detail. Escaped quotes/control characters count too.
+            if len(text) > 500:
+                low, high = len("…[已截断]"), len(detail)
+                while low < high:
+                    middle = (low + high + 1) // 2
+                    candidate = json.dumps({'error': {'message': error_excerpt(detail, middle)}}, ensure_ascii=False)
+                    if len(candidate) <= 500:
+                        low = middle
+                    else:
+                        high = middle - 1
+                text = json.dumps({'error': {'message': error_excerpt(detail, low)}}, ensure_ascii=False)
+        return self._redact(text)
 
     def _policy_feedback(self, prompt: str, raw: str) -> str:
         detail = self._redact(self._api_error_detail(self._redact(raw)))
-        lines = [
-            "已知事实：生图接口返回 HTTP 400；该任务失败，未收到可发送的新图片。",
-            "源图消息 ID 仅用于本地读取原图，不会作为消息 ID 传给生图接口。不能仅凭 HTTP 400 断言源图 ID 错误。",
-            "接口没有说明具体原因时，如实告诉用户原因不明，不要自行编造。",
-        ]
-        if detail:
-            lines.append("接口说明：" + detail[:300])
-        if detail.lower() in {"", "openai_error", "upstream_error", "invalid_request_error", "bad_request", "unknown_error", "error"}:
-            lines.append("这种通用错误有时是提示词被拦截。可以告诉用户，并修改提示词后重新生成。")
+        generic = detail.lower() in {"", "openai_error", "upstream_error", "invalid_request_error", "bad_request", "unknown_error", "error"}
+        lines = ["HTTP 400；接口说明：" + error_excerpt(detail or "未提供可用说明", 300)]
+        if generic:
+            lines.append("原因不明。")
+        lines.append("本次失败；不凭400推断内容审核或源图原因，不自动重试。")
         return "\n".join(lines)
 
     def _inject_task_status(self, kwargs: Dict[str, Any]) -> bool:
@@ -1161,7 +1180,7 @@ class NekoDraw(MaiBotPlugin):
             if task.status == "succeeded":
                 state += " 不要再说还在画或等待出图；无需重复发送或仅为宣告完成而刷屏。"
             if task.status == 'failed':
-                state += " 详细原因请按需查询 neko_draw_status；不要仅因这条状态重复道歉或重新生成。"
+                state += " 错误摘录可按需查询 neko_draw_status（长说明会标记截断，并非完整接口原文）；不要仅因这条状态重复道歉或重新生成。"
             if task.aspect_ratio:
                 state += f" 画幅请求{task.aspect_ratio}；" + (task.aspect_ratio_feedback or "按后端映射，chat仅构图建议，不保证尺寸") + "。"
         notice = marker + "\n" + state + "\n这是本聊天在本次规划请求前核实的状态，优先于旧的排队/提交回执；不构成新的生图请求。"
@@ -1255,13 +1274,13 @@ class NekoDraw(MaiBotPlugin):
                 "仅当前用户确实要求画图时才使用生图工具；历史提及、闲聊和取消不算。"
                 "画你自己、你的自拍、自画像或以你为主角用neko_draw并设use_self_reference=true，"
                 "插件附管理员角色参考图，不必先调用query_memory，prompt只写本次场景、动作、服装或画风，不编造消息ID或文件路径。"
-                "修改聊天原图或GIF动图用neko_edit_image，GIF编辑自动补充高分辨率高帧要求；需要机器人外貌时同样设use_self_reference=true，保留聊天原图并追加角色参考。"
+                "修改聊天源图或GIF动图用neko_edit_image；上下文预览可能压缩，不能称为原始文件。GIF编辑仅补充高分辨率高帧要求，不保证效果；需要机器人外貌时同样设use_self_reference=true，保留聊天源图并追加角色参考。"
                 "用户自拍、其他人物、无人场景和Life插画不附角色参考。参考图不可用时如实说明，不退回纯文生图。"
                 + draw_hint + edit_hint
             )
         return (
             "仅当前用户确实要求画图时才使用生图工具；历史提及、闲聊和取消不算。"
-            "修改聊天原图或GIF动图用neko_edit_image，以原图为依据；GIF编辑自动补充高分辨率高帧要求。"
+            "修改聊天源图或GIF动图用neko_edit_image；上下文预览可能压缩，不能称为原始文件。GIF编辑仅补充高分辨率高帧要求，不保证效果。"
             "自画像先调用 query_memory 查长期记忆中的外貌，再把查到的特征用于neko_draw；未知特征不当作已有记忆，用户要求的新造型作为本次设定。"
             "其他文生图按用户要求调用neko_draw；自然语言、标签或混合描述均可。"
             + draw_hint + edit_hint
@@ -1274,27 +1293,27 @@ class NekoDraw(MaiBotPlugin):
             return {
                 "neko_draw": {
                     "description": (
-                        "文生图生成新图。画你自己、自拍或自画像设use_self_reference=true，插件附管理员角色参考图，"
+                        "画图/文生图生成新图。画你自己、自拍或自画像设use_self_reference=true，插件附管理员角色参考图，"
                         "不必先调用query_memory，prompt只写场景、动作、服装或画风；其他人物、用户自拍、无人场景不设。"
                         "参考图不可用会明确失败，不退回纯文生图。"
                     ),
                     "flag_description": "仅画机器人自己时设true，插件附角色参考图；其他情况保持false，不接受路径或消息ID。",
                 },
                 "neko_edit_image": {
-                    "description": "修改聊天原图或GIF动图；GIF编辑自动补充高分辨率高帧要求。需要机器人角色外貌时设use_self_reference=true：聊天原图在前，角色参考附最后，不替换原图。",
+                    "description": "改图/图生图、换背景、换装、重绘聊天源图或GIF动图；上下文预览可能压缩，不保证原始文件。GIF仅补充高分辨率高帧要求，不保证效果。需要机器人角色外貌时设use_self_reference=true：聊天源图在前，角色参考附最后，不替换源图。",
                     "flag_description": "修改涉及机器人角色并需核对外貌时设true；角色参考附在最后，不替换原图，不把所有人物改成该角色。",
                 },
             }
         return {
             "neko_draw": {
                 "description": (
-                    "文生图生成新图。画你自己或自画像先调用query_memory查长期记忆中的外貌，"
+                    "画图/文生图生成新图。画你自己或自画像先调用query_memory查长期记忆中的外貌，"
                     "把查到的特征写进prompt，未知特征不编造；其他图片按用户要求直接生成。"
                 ),
                 "flag_description": "当前未配置角色参考图，保持false；画机器人自己先用query_memory查记忆外貌。",
             },
             "neko_edit_image": {
-                "description": "修改聊天原图或GIF动图；GIF编辑自动补充高分辨率高帧要求。当前未配置角色参考图；涉及机器人外貌时先用query_memory查记忆写入prompt。",
+                "description": "改图/图生图、换背景、换装、重绘聊天源图或GIF动图；上下文预览可能压缩，不保证原始文件。GIF仅补充高分辨率高帧要求，不保证效果。当前未配置角色参考图；涉及机器人外貌时先用query_memory查记忆写入prompt。",
                 "flag_description": "当前未配置角色参考图，保持false。",
             },
         }
@@ -1344,7 +1363,7 @@ class NekoDraw(MaiBotPlugin):
     @Tool(
         "neko_draw",
         trusted_context="neko.tools.context.v1",
-        brief_description="文生图生成新图；已知画幅能力时用户指定优先，否则按画面选比例。",
+        brief_description="画图/文生图生成新图，含自拍、自画像；已知画幅能力时用户指定优先，否则按画面选比例。",
         detailed_description=(
             "生成全新图片；修改聊天中已有图片用neko_edit_image。"
             "画机器人自己的提示按当前自画像配置处理：已配置参考图时设use_self_reference=true由插件附图，"
@@ -1367,7 +1386,7 @@ class NekoDraw(MaiBotPlugin):
     async def draw(self, prompt: str = "", use_self_reference: bool = False, aspect_ratio: Optional[str] = None, **kwargs: Any) -> Dict[str, Any]:
         identity = self._tool_identity(kwargs.get("_host_context"))
         if identity is None:
-            return {"success": False, "content": "可信聊天身份缺失或矛盾，本次未提交。"}
+            return {"success": False, "content": "可信聊天身份缺失或矛盾，本次未提交；请管理员核对Host可信上下文与会话路由，不要自行填写身份重试。"}
         return await self._draw(prompt, use_self_reference, aspect_ratio, **identity)
 
     @admitted
@@ -1419,16 +1438,17 @@ class NekoDraw(MaiBotPlugin):
     @Tool(
         "neko_edit_image",
         trusted_context="neko.tools.context.v1",
-        brief_description="修改聊天原图或GIF动图；已知画幅能力时默认匹配主源图。",
+        brief_description="改图/图生图、换背景、换装、重绘聊天源图或GIF动图；预览可能压缩，不保证原始文件；GIF高分辨率高帧仅为要求，不保证效果；已知画幅能力时默认匹配主源图。",
         detailed_description=(
             "用户要求修改这张图、换背景、换装、重绘、参考原图时调用。"
             "source_message_id 填当前聊天中图片/表情包或引用消息的真实 ID，也支持上下文短消息编号及工具媒体索引，不能编造。"
             "普通消息不填source_image_index时保留多图/引用；只想修改某张普通图片时填从0开始的source_image_index。GIF保留动画，其他动图格式仍取首帧。"
             "prompt写修改要求和要保留的内容。需要机器人外貌时按当前自画像配置的use_self_reference说明处理。"
-            "最多3张聊天原图加1张参考；参考或原图不可用均失败不降级，找不到原图就请用户补发，不改用文生图冒充。"
+            "最多3张聊天源图加1张参考；参考或源图不可用均失败不降级，找不到源图就请用户补发，不改用文生图冒充。"
+            "上下文预览可能压缩，不保证原始文件；GIF高分辨率高帧仅为提示词要求，不保证效果。"
         ),
         parameters=[
-            ToolParameterInfo(name="prompt", param_type=ToolParamType.STRING, description="修改要求和保留内容；GIF编辑自动补充“高分辨率高帧”", required=True),
+            ToolParameterInfo(name="prompt", param_type=ToolParamType.STRING, description="修改要求和保留内容；GIF编辑自动补充“高分辨率高帧”，不保证效果", required=True),
             ToolParameterInfo(name="source_message_id", param_type=ToolParamType.STRING, description="当前聊天中的真实消息ID、短消息编号或工具媒体索引", required=True),
             ToolParameterInfo(name="source_image_index", param_type=ToolParamType.INTEGER, description="可选，指定普通图片在源消息中的索引，从0开始；不用于emoji表情包", required=False),
             ToolParameterInfo(name="use_self_reference", param_type=ToolParamType.BOOLEAN, description="修改涉及机器人角色外貌时按当前自画像配置的说明使用；不填本地路径。", required=False),
@@ -1439,7 +1459,7 @@ class NekoDraw(MaiBotPlugin):
     async def edit_image(self, prompt: str = "", source_message_id: str = "", source_image_index: int | None = None, use_self_reference: bool = False, aspect_ratio: Optional[str] = None, **kwargs: Any) -> Dict[str, Any]:
         identity = self._tool_identity(kwargs.get("_host_context"))
         if identity is None:
-            return {"success": False, "content": "可信聊天身份缺失或矛盾，本次未提交。"}
+            return {"success": False, "content": "可信聊天身份缺失或矛盾，本次未提交；请管理员核对Host可信上下文与会话路由，不要自行填写身份重试。"}
         return await self._edit_image(prompt, source_message_id, source_image_index, use_self_reference, aspect_ratio, **identity)
 
     @admitted
@@ -1450,7 +1470,7 @@ class NekoDraw(MaiBotPlugin):
         except ValueError as exc:
             return {"success": False, "content": str(exc) + "，未提交。"}
         if not isinstance(prompt, str) or not isinstance(source_message_id, str) or type(use_self_reference) is not bool:
-            return {"success": False, "content": "修改要求、原图编号或自参考参数无效"}
+            return {"success": False, "content": "修改要求、源图编号或自参考参数无效"}
         stream_id = self._stream_id(kwargs)
         if len(prompt) > MAX_PROMPT_CHARS:
             return {"success": False, "content": "提示词最多4000字符，本次未提交。"}
@@ -1461,12 +1481,12 @@ class NekoDraw(MaiBotPlugin):
         try:
             images = await resolve_edit_images(self.ctx, stream_id, source_message_id.strip(), kwargs.get("message"), self._image_cache, index=source_image_index)
         except Exception as exc:
-            return {"success": False, "content": "无法取得原图：" + self._redact(str(exc))[:300]}
+            return {"success": False, "content": "无法取得聊天源图：" + error_excerpt(self._redact(str(exc)), 300)}
         if not self._current(generation):
             return {"success": False, "content": "插件生命周期已更改，本次未提交。"}
         source_count = len(images)
         if not images:
-            return {"success": False, "content": "没有取得聊天原图，未提交；角色参考不能代替待修改原图。"}
+            return {"success": False, "content": "没有取得聊天源图，未提交；角色参考不能代替待修改源图。"}
         ratio_origin = "显式参数"
         canvas = None
         if ratio in (None, "source"):
@@ -1483,7 +1503,7 @@ class NekoDraw(MaiBotPlugin):
             text += '\n高分辨率高帧'
         if use_self_reference:
             if source_count > 3:
-                return {"success": False, "content": "自参考编辑最多3张聊天原图加1张角色参考；请用source_image_index明确选择原图，未自动丢弃图片。"}
+                return {"success": False, "content": "自参考编辑最多3张聊天源图加1张角色参考；请用source_image_index明确选择源图，未自动丢弃图片。"}
             settings = (self.config.self_portrait.enabled, self.config.self_portrait.reference_path)
             if not settings[0] or not settings[1]:
                 return {"success": False, "content": "未启用或配置角色参考图，本次未提交；不会忽略自参考选项。"}
@@ -1503,20 +1523,20 @@ class NekoDraw(MaiBotPlugin):
                                 aspect_ratio=ratio, aspect_ratio_origin=ratio_origin, source_canvas=canvas,
                                 aspect_ratio_automatic=aspect_ratio is None)
         task.display_prompt = prompt.strip()
-        notice = f"已读取 {source_count} 张聊天原图" + ("，并在最后附1张角色外貌参考" if use_self_reference else "")
+        notice = f"已读取 {source_count} 张聊天源图（平台或上下文预览可能压缩，不保证原始文件）" + ("，并在最后附1张角色外貌参考" if use_self_reference else "")
         return {"success": True, "content": notice + "并提交图生图，不代表已经生成成功。完成后直接发图；以下仅为提交时快照，后续以插件实时状态或 neko_draw_status 为准。\n" + task.summary()}
 
     @Tool(
         "neko_draw_status",
         trusted_context="neko.tools.context.v1",
-        brief_description="查看当前聊天最近一次生图的进度",
-        detailed_description="用户问画好了没有、生图进度、上一张图的状态时调用。不要用它开始新的绘图。",
+        brief_description="查询当前聊天最近一次画图/生图的状态、进度、失败原因（错误摘录）；长说明标记截断，不提供完整接口原文。",
+        detailed_description="用户问画好了没有、生图进度、上一张图的状态或失败原因时调用。错误摘录最多180字符，长说明标记截断。不要用它开始新的绘图。",
         parameters=[],
     )
     async def draw_status(self, **kwargs: Any) -> Dict[str, Any]:
         identity = self._tool_identity(kwargs.get("_host_context"))
         if identity is None:
-            return {"success": False, "content": "可信聊天身份缺失或矛盾。"}
+            return {"success": False, "content": "可信聊天身份缺失或矛盾，未查询；请管理员核对Host可信上下文与会话路由，不要自行填写身份重试。"}
         return {"success": True, "content": self._status_text(identity["stream_id"])}
 
     @staticmethod
@@ -1591,7 +1611,7 @@ class NekoDraw(MaiBotPlugin):
     ) -> Tuple[bool, str, bool]:
         identity = self._command_identity(stream_id, user_id, kwargs)
         if identity is None:
-            return False, "可信聊天身份缺失或矛盾", True
+            return False, "可信聊天身份缺失或矛盾；请管理员核对入站身份与会话路由，不要自行填写身份重试", True
         sender = identity["user_id"]
         if not self._allowed(sender, identity["platform"]):
             self.ctx.logger.info("拒绝 /draw：用户 %s 不在白名单", sender or "未知")

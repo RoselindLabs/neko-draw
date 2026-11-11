@@ -143,7 +143,7 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
         args=self.bot._start_task.call_args.args
         self.assertEqual(args[3],[*sources,self.data]);self.assertEqual(sources,[image_bytes('PNG'),image_bytes('WEBP')])
         self.assertIn('前2张',args[1]);self.assertIn('最后1张',args[1]);self.assertNotIn(str(self.path),args[1])
-        self.assertIn('2 张聊天原图',result['content']);self.assertIn('附1张',result['content'])
+        self.assertIn('2 张聊天源图',result['content']);self.assertIn('附1张',result['content'])
         self.assertEqual(resolve.call_args.args[1:3],('chat','source'))
 
     async def test_ordinary_edit_does_not_read_or_append_reference(self):

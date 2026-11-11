@@ -194,10 +194,64 @@ class TaskFeedback(unittest.IsolatedAsyncioTestCase):
                     'HTTP 400：{"error":{"code":"openai_error"}}'):
             text = self.bot._policy_feedback('prompt', raw)
             self.assertIn('原因不明', text)
-            self.assertIn('不能仅凭 HTTP 400 断言源图 ID 错误', text)
-            self.assertIn('有时是提示词被拦截', text)
-            self.assertIn('修改提示词后重新生成', text)
+            self.assertIn('不凭400推断内容审核或源图原因', text)
+            self.assertNotIn('有时是提示词被拦截', text)
+            self.assertNotIn('修改提示词后重新生成', text)
             self.assertNotIn('只试一次', text)
         specific = self.bot._policy_feedback('', 'HTTP 400：{"error":{"message":"Invalid size: 999x999"}}')
         self.assertIn('Invalid size: 999x999', specific)
         self.assertNotIn('具体原因未知', specific)
+
+    async def test_http_400_dimensions_survive_status_and_long_json_stays_bounded(self):
+        from test_tool_context import tool_context
+
+        self.bot.config.openai.api_key = 'synthetic-secret'
+        detail = ('Image dimensions rejected by configured route. Allowed dimensions are '
+                  '1024x1024, 1536x1024, or 1024x1536.')
+        for suffix in ('', ' synthetic-secret ' + '\n"\\' * 400):
+            raw = json.dumps({'error': {'message': detail + suffix}}).encode()
+            bounded = self.bot._error_text(raw)
+            self.assertLessEqual(len(bounded), 500)
+            json.loads(bounded)  # Long escaped diagnostics must stay parseable.
+            self.bot._generate = AsyncMock(side_effect=self.mod.PromptRejected('HTTP 400：' + bounded))
+            self.bot._send = AsyncMock()
+            await self.bot._run_task(self.task)
+            result = await self.bot.draw_status(_host_context=tool_context('chat-a'))
+            text = result['content']
+            self.assertIn(detail, text)
+            self.assertNotIn('synthetic-secret', text)
+            reason = text.split('原因：', 1)[1]
+            self.assertLessEqual(len(reason), 180)
+            self.assertEqual('[已截断]' in text, bool(suffix))
+            self.assertEqual(self.task.status, 'failed')
+            self.bot._send.assert_not_awaited()
+
+    async def test_admission_busy_explains_existing_task_or_global_capacity(self):
+        from test_tool_context import tool_context
+
+        self.bot._start_task = Mock()
+        for status in ('queued', 'running', 'retrying'):
+            self.task.touch(status)
+            for handler, args in ((self.bot.draw, {'prompt': 'cat'}),
+                                  (self.bot.edit_image, {'prompt': 'edit', 'source_message_id': 'm'})):
+                result = await handler(**args, _host_context=tool_context('chat-a'))
+                self.assertFalse(result['success'])
+                self.assertIn(self.task.task_id, result['content'])
+                self.assertIn(self.task.summary(), result['content'])
+                self.assertIn('不要重复提交', result['content'])
+                self.assertIn('neko_draw_status', result['content'])
+                self.assertNotIn('全局', result['content'])
+        self.task.touch('failed')
+        self.assertTrue(self.bot._reserve('chat-a'))
+        result = await self.bot.draw(prompt='cat', _host_context=tool_context('chat-a'))
+        self.assertIn('正在准备', result['content'])
+        self.assertIn('chat-a', self.bot._reservations)  # Refusal must not free the original reservation.
+        self.bot._reservations.clear()
+        for n in range(self.mod.MAX_ADMITTED):
+            self.assertTrue(self.bot._reserve(f'other-{n}'))
+        result = await self.bot.draw(prompt='cat', _host_context=tool_context('chat-a'))
+        self.assertIn('全局任务容量已满，本次未提交', result['content'])
+        self.assertIn('稍后按需重新请求', result['content'])
+        self.assertNotIn(self.task.task_id, result['content'])
+        self.assertEqual(len(self.bot._reservations), self.mod.MAX_ADMITTED)
+        self.bot._start_task.assert_not_called()
