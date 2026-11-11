@@ -1293,27 +1293,26 @@ class NekoDraw(MaiBotPlugin):
             return {
                 "neko_draw": {
                     "description": (
-                        "画图/文生图生成新图。画你自己、自拍或自画像设use_self_reference=true，插件附管理员角色参考图，"
-                        "不必先调用query_memory，prompt只写场景、动作、服装或画风；其他人物、用户自拍、无人场景不设。"
-                        "参考图不可用会明确失败，不退回纯文生图。"
+                        "画图/文生图生成新图；修改聊天原图用neko_edit_image。"
+                        "画机器人自己（含自拍、自画像）设use_self_reference=true，无需先查query_memory。"
                     ),
-                    "flag_description": "仅画机器人自己时设true，插件附角色参考图；其他情况保持false，不接受路径或消息ID。",
+                    "flag_description": "仅画机器人自己时设true，插件附管理员角色参考图；prompt只写场景、动作、服装或画风。参考图不可用则失败，不退回纯文生图。其他人物、用户自拍或无人场景保持false；不接受路径或消息ID。",
                 },
                 "neko_edit_image": {
-                    "description": "改图/图生图、换背景、换装、重绘聊天源图或GIF动图；上下文预览可能压缩，不保证原始文件。GIF仅补充高分辨率高帧要求，不保证效果。需要机器人角色外貌时设use_self_reference=true：聊天源图在前，角色参考附最后，不替换源图。",
-                    "flag_description": "修改涉及机器人角色并需核对外貌时设true；角色参考附在最后，不替换原图，不把所有人物改成该角色。",
+                    "description": "改图/图生图：修改聊天图片或GIF，如换背景、换装、重绘。需要机器人角色外貌时设use_self_reference=true。",
+                    "flag_description": "修改涉及机器人角色且需核对外貌时设true；最多3张聊天源图在前，1张角色参考附最后，不替换源图，也不把所有人物改成该角色。参考不可用则失败，不降级。",
                 },
             }
         return {
             "neko_draw": {
                 "description": (
-                    "画图/文生图生成新图。画你自己或自画像先调用query_memory查长期记忆中的外貌，"
-                    "把查到的特征写进prompt，未知特征不编造；其他图片按用户要求直接生成。"
+                    "画图/文生图生成新图；修改聊天原图用neko_edit_image。"
+                    "画机器人自己（含自拍、自画像）先用query_memory查长期记忆外貌，写入prompt，不编造未知特征。"
                 ),
                 "flag_description": "当前未配置角色参考图，保持false；画机器人自己先用query_memory查记忆外貌。",
             },
             "neko_edit_image": {
-                "description": "改图/图生图、换背景、换装、重绘聊天源图或GIF动图；上下文预览可能压缩，不保证原始文件。GIF仅补充高分辨率高帧要求，不保证效果。当前未配置角色参考图；涉及机器人外貌时先用query_memory查记忆写入prompt。",
+                "description": "改图/图生图：修改聊天图片或GIF，如换背景、换装、重绘。当前未配置角色参考图；涉及机器人外貌时先用query_memory查记忆并写入prompt。",
                 "flag_description": "当前未配置角色参考图，保持false。",
             },
         }
@@ -1335,7 +1334,7 @@ class NekoDraw(MaiBotPlugin):
                 continue
             new_function = dict(function)
             ratio_hint = draw_hint if function["name"] == "neko_draw" else edit_hint
-            new_function["description"] = hint["description"] + ratio_hint
+            new_function["description"] = hint["description"] + "画幅选择见aspect_ratio参数说明。"
             parameters = function.get("parameters")
             properties = parameters.get("properties") if isinstance(parameters, dict) else None
             flag = properties.get("use_self_reference") if isinstance(properties, dict) else None
@@ -1438,19 +1437,16 @@ class NekoDraw(MaiBotPlugin):
     @Tool(
         "neko_edit_image",
         trusted_context="neko.tools.context.v1",
-        brief_description="改图/图生图、换背景、换装、重绘聊天源图或GIF动图；预览可能压缩，不保证原始文件；GIF高分辨率高帧仅为要求，不保证效果；已知画幅能力时默认匹配主源图。",
+        brief_description="改图/图生图：修改聊天图片或GIF；生成全新图片用neko_draw。",
         detailed_description=(
-            "用户要求修改这张图、换背景、换装、重绘、参考原图时调用。"
-            "source_message_id 填当前聊天中图片/表情包或引用消息的真实 ID，也支持上下文短消息编号及工具媒体索引，不能编造。"
-            "普通消息不填source_image_index时保留多图/引用；只想修改某张普通图片时填从0开始的source_image_index。GIF保留动画，其他动图格式仍取首帧。"
-            "prompt写修改要求和要保留的内容。需要机器人外貌时按当前自画像配置的use_self_reference说明处理。"
-            "最多3张聊天源图加1张参考；参考或源图不可用均失败不降级，找不到源图就请用户补发，不改用文生图冒充。"
-            "上下文预览可能压缩，不保证原始文件；GIF高分辨率高帧仅为提示词要求，不保证效果。"
+            "用于换背景、换装、重绘或参考原图。GIF保留动画，其他动图格式取首帧。"
+            "自参考编辑最多3张聊天源图加1张角色参考；源图或参考不可用均失败，不降级。"
+            "找不到源图请用户补发，不用文生图冒充。涉及机器人外貌时按use_self_reference说明处理。"
         ),
         parameters=[
-            ToolParameterInfo(name="prompt", param_type=ToolParamType.STRING, description="修改要求和保留内容；GIF编辑自动补充“高分辨率高帧”，不保证效果", required=True),
-            ToolParameterInfo(name="source_message_id", param_type=ToolParamType.STRING, description="当前聊天中的真实消息ID、短消息编号或工具媒体索引", required=True),
-            ToolParameterInfo(name="source_image_index", param_type=ToolParamType.INTEGER, description="可选，指定普通图片在源消息中的索引，从0开始；不用于emoji表情包", required=False),
+            ToolParameterInfo(name="prompt", param_type=ToolParamType.STRING, description="修改要求和保留内容；GIF保留动画，其他动图格式取首帧。GIF编辑自动补充“高分辨率高帧”，不保证效果", required=True),
+            ToolParameterInfo(name="source_message_id", param_type=ToolParamType.STRING, description="当前聊天中图片、表情包或引用消息的真实ID，也支持短消息编号、工具媒体索引；不能编造。预览可能压缩，不保证原始文件；找不到源图请用户补发，不用文生图冒充。", required=True),
+            ToolParameterInfo(name="source_image_index", param_type=ToolParamType.INTEGER, description="指定某张普通图片，从0开始；省略时保留多图/引用。不用于emoji表情包", required=False),
             ToolParameterInfo(name="use_self_reference", param_type=ToolParamType.BOOLEAN, description="修改涉及机器人角色外貌时按当前自画像配置的说明使用；不填本地路径。", required=False),
             ToolParameterInfo(name="aspect_ratio", param_type=ToolParamType.STRING,
                               description=EDIT_RATIO_HINT, enum_values=[*ASPECT_RATIOS, "source"], required=False),
@@ -1529,8 +1525,8 @@ class NekoDraw(MaiBotPlugin):
     @Tool(
         "neko_draw_status",
         trusted_context="neko.tools.context.v1",
-        brief_description="查询当前聊天最近一次画图/生图的状态、进度、失败原因（错误摘录）；长说明标记截断，不提供完整接口原文。",
-        detailed_description="用户问画好了没有、生图进度、上一张图的状态或失败原因时调用。错误摘录最多180字符，长说明标记截断。不要用它开始新的绘图。",
+        brief_description="查询当前聊天最近一次画图/生图的状态、进度或失败原因；不开始新绘图。",
+        detailed_description="失败原因仅提供最多180字符的错误摘录；长说明标记截断，不提供完整接口原文。",
         parameters=[],
     )
     async def draw_status(self, **kwargs: Any) -> Dict[str, Any]:

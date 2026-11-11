@@ -96,9 +96,9 @@ class AspectRatioTests(unittest.IsolatedAsyncioTestCase):
                 schema = function['parameters']
                 self.assertNotIn('aspect_ratio', schema['required'])
                 self.assertIn('16:9', schema['properties']['aspect_ratio']['enum'])
-                self.assertIn('用户指定', function['description'])
+                self.assertIn('用户指定', schema['properties']['aspect_ratio']['description'])
                 self.assertIn('chat', schema['properties']['aspect_ratio']['description'])
-            self.assertIn('主动选择', result['modified_kwargs']['tool_definitions'][0]['function']['description'])
+            self.assertIn('主动选择', result['modified_kwargs']['tool_definitions'][0]['function']['parameters']['properties']['aspect_ratio']['description'])
         for ratio in ('16:9', '9:16'):
             result, task = await self.invoke(aspect_ratio=ratio)
             self.assertTrue(result['success'])
@@ -383,7 +383,7 @@ class AspectRatioTests(unittest.IsolatedAsyncioTestCase):
                     result = await self.bot.configure_planner(session_id='chat', messages=[{'role': 'user', 'content': '请画一张猫'}], tool_definitions=definitions)
                     for definition in result['modified_kwargs']['tool_definitions']:
                         function = definition['function']
-                        self.assertIn('不要主动添加aspect_ratio', function['description'])
+                        self.assertIn('aspect_ratio参数说明', function['description'])
                         self.assertIn('不要主动添加aspect_ratio', function['parameters']['properties']['aspect_ratio']['description'])
                     self.assertIn('不要主动添加aspect_ratio', result['modified_kwargs']['messages'][-1]['content'])
                     self.assertNotIn('按画面主动选择', result['modified_kwargs']['messages'][-1]['content'])
