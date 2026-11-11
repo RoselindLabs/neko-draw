@@ -69,8 +69,10 @@ class AspectRatioTests(unittest.IsolatedAsyncioTestCase):
     def definition(self, name):
         component = next(item for item in self.bot.get_components() if item['name'] == name)
         info = ToolComponentInfo(name=name, **component['metadata'])
+        get_brief_description = getattr(info, 'get_brief_description', None)
+        description = get_brief_description() if callable(get_brief_description) else info.description
         return component, {'type': 'function', 'function': {
-            'name': name, 'description': info.get_brief_description(),
+            'name': name, 'description': description,
             'parameters': info.get_parameters_schema()}}
 
     async def invoke(self, name='neko_draw', **args):
