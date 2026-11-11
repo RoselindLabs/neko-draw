@@ -22,6 +22,7 @@ def collected(group):
 groups = set(collected(suite))
 required = {
     "test_admission_safety",
+    "test_aspect_ratio",
     "test_public_http",
     "test_life_authorization",
     "test_revision_safety",

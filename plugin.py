@@ -9,12 +9,15 @@ import json
 import re
 import time
 import uuid
+import io
+import math
 from functools import wraps
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional, Tuple
 from urllib.parse import urlsplit
 
 import aiohttp
+from PIL import Image
 
 from maibot_sdk import API, Command, Field, HookHandler, MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder, ToolParameterInfo, ToolParamType
@@ -42,6 +45,123 @@ class GenerationNotSubmitted(RuntimeError):
 
 class AdmissionExpired(RuntimeError):
     """Local work expired before its first generation attempt, never submitted."""
+
+
+ASPECT_RATIOS = ("1:1", "4:3", "3:4", "3:2", "2:3", "16:9", "9:16")
+ASPECT_RATIO_VALUES = {
+    "1:1": 1.0,
+    "4:3": 4 / 3,
+    "3:4": 3 / 4,
+    "3:2": 3 / 2,
+    "2:3": 2 / 3,
+    "16:9": 16 / 9,
+    "9:16": 9 / 16,
+}
+OPENAI_STANDARD_SIZES = {
+    "1:1": "1024x1024",
+    "3:2": "1536x1024",
+    "2:3": "1024x1536",
+}
+OPENAI_CUSTOM_SIZES = {
+    "1:1": "1024x1024",
+    "4:3": "1024x768",
+    "3:4": "768x1024",
+    "3:2": "1536x1024",
+    "2:3": "1024x1536",
+    "16:9": "1536x864",
+    "9:16": "864x1536",
+}
+OPENAI_RATIO_MODELS = {"gpt-image-2", "gpt-image-2-2026-04-21", "gpt-image-1", "gpt-image-1-mini", "gpt-image-1.5"}
+GEMINI_RATIO_MODELS = {
+    "gemini-2.5-flash-image", "gemini-2.5-flash-image-preview",
+    "gemini-3-pro-image", "gemini-3-pro-image-preview",
+    "gemini-3.1-flash-image", "gemini-3.1-flash-image-preview",
+}
+
+
+def ratio_capability(config, provider: str) -> str:
+    """Configured contract, never inferred from auto's successful-route cache."""
+    cfg = getattr(config, provider)
+    if provider == "openai":
+        if cfg.mode == "chat":
+            return "chat"
+        # auto includes Images even when chat was previously successful. Explicit
+        # ratios require its known contract; this check never makes a probe.
+        return "images" if cfg.model.strip() in OPENAI_RATIO_MODELS else "unknown"
+    if cfg.mode == "openai":
+        return "chat"
+    return "native" if cfg.model.strip() in GEMINI_RATIO_MODELS else "unknown"
+
+
+def task_route_ratio(task, capability: str) -> Optional[str]:
+    ratio = getattr(task, 'aspect_ratio', None)
+    if ratio and capability == "unknown":
+        if not getattr(task, 'aspect_ratio_automatic', False):
+            raise ValueError("当前路由模型未登记画幅能力，显式aspect_ratio/source未提交；不能猜测别名支持")
+        task.aspect_ratio_feedback = "当前路由画幅能力未知，源比例未应用；沿用原配置及路由，不保证输出尺寸"
+        return None
+    return ratio
+
+
+def normalize_aspect_ratio(value: Any, *, allow_source: bool = True) -> Optional[str]:
+    """Validate the public value before any source lookup or supplier request."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("aspect_ratio 必须是 source 或有限比例枚举")
+    text = value.strip().lower()
+    if text == "source" and allow_source:
+        return text
+    if text in ASPECT_RATIOS:
+        return text
+    raise ValueError("aspect_ratio 仅支持1:1、4:3、3:4、3:2、2:3、16:9、9:16；source仅用于改图")
+
+
+def nearest_ratio(ratio: float, choices=ASPECT_RATIOS) -> str:
+    # Log distance treats portrait and landscape reciprocally.
+    return min(choices, key=lambda item: abs(math.log(ASPECT_RATIO_VALUES[item] / ratio)))
+
+
+def source_canvas(data: bytes) -> tuple[int, int]:
+    """Read the already-bounded source canvas header; never decode animation frames."""
+    with Image.open(io.BytesIO(data)) as image:
+        return image.size
+
+
+def openai_ratio_size(model: str, ratio: str, canvas: Optional[tuple[int, int]] = None) -> tuple[str, str]:
+    """Only known model contracts; do not infer support from an arbitrary alias."""
+    if model in {"gpt-image-2", "gpt-image-2-2026-04-21"}:
+        return OPENAI_CUSTOM_SIZES[ratio], ratio
+    if model in {"gpt-image-1", "gpt-image-1-mini", "gpt-image-1.5"}:
+        target = canvas[0] / canvas[1] if canvas else ASPECT_RATIO_VALUES[ratio]
+        nearest = nearest_ratio(target, OPENAI_STANDARD_SIZES)
+        return OPENAI_STANDARD_SIZES[nearest], nearest
+    raise ValueError("当前 Images 模型未登记尺寸支持，未提交；请管理员核验模型，不能保证所选画幅")
+
+
+def chat_ratio_prompt(prompt: str, ratio: Optional[str]) -> str:
+    return prompt + f"\n画面构图建议：宽高比 {ratio}（此聊天接口不保证输出尺寸）。" if ratio else prompt
+
+
+DRAW_RATIO_HINT = "仅当前路由已登记画幅能力或明确chat模式时，用户指定优先，否则按画面主动选择aspect_ratio；能力未知应省略，保留配置且不保证画幅。chat仅构图建议，不保证尺寸。"
+EDIT_RATIO_HINT = "用户指定画幅优先；省略时仅已知能力路由应用主源图比例，未知则保留配置并报告未应用。source/明确比例在未知能力路由会拒绝；角色参考不影响画幅，chat仅构图建议。"
+
+
+def planner_ratio_hints(config) -> tuple[str, str]:
+    # Describe only the first locally usable provider; a backup is checked when
+    # reached, never allowed to veto a successful preferred provider.
+    provider = config.general.provider
+    cfg = getattr(config, provider)
+    if not cfg.enabled or not cfg.api_key.strip():
+        fallback = config.general.fallback_provider
+        if fallback in {"openai", "gemini"}:
+            provider = fallback
+    if ratio_capability(config, provider) == "unknown":
+        unavailable = ("当前有效路由画幅能力未登记，不要主动添加aspect_ratio。省略保留原配置/路由；"
+                       "用户指定画幅时先说明无法保证，不把省略说成支持。显式比例/source会在请求前拒绝。")
+        return unavailable, unavailable + "改图省略时源比例未应用；角色参考不决定画幅。"
+    return ("用户指定画幅优先填aspect_ratio；未指定时按画面主动选择比例。省略沿用配置；chat仅构图建议，不保证尺寸。",
+            "用户指定画幅优先填aspect_ratio；否则省略或source按第一张聊天原图画布匹配最接近比例，角色参考不影响；chat仅构图建议，不保证尺寸。")
 
 
 def admitted(method):
@@ -104,7 +224,7 @@ class OpenAIConfig(PluginConfigBase):
     base_url: str = Field(default="https://api.openai.com/v1", description="兼容接口地址")
     api_key: str = Field(default="", description="API Key")
     model: str = Field(default="gpt-image-2", description="生图模型")
-    size: str = Field(default="1024x1024", description="图片尺寸，例如 1024x1024")
+    size: str = Field(default="1024x1024", description="draw未指定aspect_ratio时的Images默认尺寸，例如1024x1024；chat不保证尺寸")
     mode: Literal["auto", "images", "chat"] = Field(
         default="auto",
         description="auto=官方生图接口明确未执行时才改试聊天补全；成功响应后取图失败不改试",
@@ -119,7 +239,7 @@ class GeminiConfig(PluginConfigBase):
     base_url: str = Field(default="https://generativelanguage.googleapis.com", description="Gemini 或兼容网关地址")
     api_key: str = Field(default="", description="API Key")
     model: str = Field(default="gemini-3.1-flash-image-preview", description="图片模型")
-    aspect_ratio: str = Field(default="1:1", description="宽高比，例如 1:1 或 16:9")
+    aspect_ratio: str = Field(default="1:1", description="draw未指定aspect_ratio时的native默认宽高比；edit仅已知能力时匹配主源图，未知沿用配置；兼容chat不保证尺寸")
     mode: Literal["native", "openai"] = Field(
         default="native",
         description="native=generateContent；openai=把地址当 OpenAI 兼容网关",
@@ -183,6 +303,11 @@ class DrawTask:
         self.terminal_hint_used = False
         self.admission_deadline: Optional[float] = None
         self.life_policy = None
+        self.aspect_ratio: Optional[str] = None
+        self.aspect_ratio_automatic = False
+        self.aspect_ratio_origin = "配置默认"
+        self.aspect_ratio_feedback = ""
+        self.source_canvas: Optional[tuple[int, int]] = None
 
     def touch(self, status: str, **fields: Any) -> None:
         if status in {'succeeded', 'failed', 'unknown'} and self.status not in {'succeeded', 'failed', 'unknown'}:
@@ -209,6 +334,9 @@ class DrawTask:
         ]
         if self.provider:
             lines.append(f"接口：{self.provider}")
+        if self.aspect_ratio:
+            lines.append(f"画幅请求：{self.aspect_ratio}（{self.aspect_ratio_origin}）；" +
+                         (self.aspect_ratio_feedback or "按后端能力映射，chat仅构图建议，不保证尺寸"))
         if self.error:
             lines.append(f"原因：{self.error[:180]}")
         return "\n".join(lines)
@@ -532,6 +660,9 @@ class NekoDraw(MaiBotPlugin):
         cfg = self.config.openai
         if not cfg.enabled:
             raise GenerationNotSubmitted("OpenAI 未启用")
+        if getattr(task, 'aspect_ratio', None) and not cfg.api_key.strip():
+            raise GenerationNotSubmitted("未配置 OpenAI API Key")
+        ratio = task_route_ratio(task, ratio_capability(self.config, "openai"))
         editing = bool(task and task.images)
         preferred = self._preferred_openai_edit_mode if editing else self._preferred_openai_mode
         if cfg.mode == "images":
@@ -546,7 +677,19 @@ class NekoDraw(MaiBotPlugin):
         errors: List[str] = []
         for name, method in methods:
             try:
-                image = await self._call_with_retry(task, f"openai/{name}", lambda method=method: method(prompt, cfg, task.images if task else None))
+                route_cfg = cfg
+                route_prompt = prompt
+                if ratio:
+                    if name == "images":
+                        size, mapped = openai_ratio_size(cfg.model.strip(), ratio, getattr(task, 'source_canvas', None))
+                        route_cfg = cfg.model_copy(update={"size": size})
+                        task.aspect_ratio_feedback = f"Images请求size={size}" + (f"，近似为{mapped}，非精确{ratio}" if mapped != ratio else "")
+                    else:
+                        route_prompt = chat_ratio_prompt(prompt, ratio)
+                        task.aspect_ratio_feedback = "chat仅提示词构图建议，不保证输出尺寸"
+                image = await self._call_with_retry(task, f"openai/{name}",
+                                                    lambda method=method, route_prompt=route_prompt, route_cfg=route_cfg:
+                                                    method(route_prompt, route_cfg, task.images if task else None))
                 if editing:
                     self._preferred_openai_edit_mode = name
                 else:
@@ -560,8 +703,11 @@ class NekoDraw(MaiBotPlugin):
                     break
         raise GenerationNotSubmitted("；".join(errors) or "OpenAI 生图失败")
 
-    async def _gemini_native(self, prompt: str, images: Optional[List[bytes]] = None) -> bytes:
+    async def _gemini_native(self, prompt: str, images: Optional[List[bytes]] = None, aspect_ratio: Optional[str] = None) -> bytes:
         cfg = self.config.gemini
+        ratio = cfg.aspect_ratio.strip() if aspect_ratio is None else normalize_aspect_ratio(aspect_ratio, allow_source=False)
+        if aspect_ratio is not None and cfg.model.strip() not in GEMINI_RATIO_MODELS:
+            raise ValueError("当前 Gemini native 模型未登记画幅支持，未提交；请管理员核验模型")
         if not cfg.api_key.strip():
             raise GenerationNotSubmitted("未配置 Gemini API Key")
         root = cfg.base_url.strip().rstrip("/")
@@ -582,8 +728,8 @@ class NekoDraw(MaiBotPlugin):
             ]}],
             "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
         }
-        if cfg.aspect_ratio.strip():
-            payload["generationConfig"]["imageConfig"] = {"aspectRatio": cfg.aspect_ratio.strip()}
+        if ratio:
+            payload["generationConfig"]["imageConfig"] = {"aspectRatio": ratio}
         body = await self._post_json(url, payload, headers, cfg.proxy)
         try:
             return await self._gemini_result(body)
@@ -611,6 +757,9 @@ class NekoDraw(MaiBotPlugin):
         cfg = self.config.gemini
         if not cfg.enabled:
             raise GenerationNotSubmitted("Gemini 未启用")
+        if getattr(task, 'aspect_ratio', None) and not cfg.api_key.strip():
+            raise GenerationNotSubmitted("未配置 Gemini API Key")
+        ratio = task_route_ratio(task, ratio_capability(self.config, "gemini"))
         if cfg.mode == "openai":
             mirrored = OpenAIConfig(
                 enabled=True,
@@ -621,8 +770,13 @@ class NekoDraw(MaiBotPlugin):
                 mode="chat",
                 proxy=cfg.proxy,
             )
-            return await self._call_with_retry(task, "gemini/openai", lambda: self._openai_chat(prompt, mirrored, task.images if task else None))
-        return await self._call_with_retry(task, "gemini", lambda: self._gemini_native(prompt, task.images if task else None))
+            if ratio:
+                task.aspect_ratio_feedback = "Gemini兼容chat仅提示词构图建议，不保证输出尺寸"
+            return await self._call_with_retry(task, "gemini/openai", lambda: self._openai_chat(chat_ratio_prompt(prompt, ratio), mirrored, task.images if task else None))
+        if ratio:
+            task.aspect_ratio_feedback = f"Gemini native请求aspectRatio={ratio}（不是输出像素验收）"
+        extra = {"aspect_ratio": ratio} if ratio else {}
+        return await self._call_with_retry(task, "gemini", lambda: self._gemini_native(prompt, task.images if task else None, **extra))
 
     async def _generate(self, prompt: str, task: Optional[DrawTask] = None) -> Tuple[bytes, str]:
         order = [self.config.general.provider]
@@ -753,7 +907,10 @@ class NekoDraw(MaiBotPlugin):
         return (not self._life_closed and self.config.plugin.enabled and self.config.life.enabled
                 and life_target_policy(self.config.life) == policy)
 
-    def _start_task(self, stream_id: str, prompt: str, user_id: str, images: Optional[List[bytes]] = None) -> DrawTask:
+    def _start_task(self, stream_id: str, prompt: str, user_id: str, images: Optional[List[bytes]] = None,
+                    *, aspect_ratio: Optional[str] = None, aspect_ratio_origin: str = "显式参数",
+                    source_canvas: Optional[tuple[int, int]] = None, aspect_ratio_automatic: bool = False) -> DrawTask:
+        aspect_ratio = normalize_aspect_ratio(aspect_ratio, allow_source=False)
         if not self._current(self._generation_id()):
             raise asyncio.CancelledError
         if len(prompt) > MAX_PROMPT_CHARS + 2000:
@@ -773,6 +930,12 @@ class NekoDraw(MaiBotPlugin):
         task.generation = self._generation_id()
         task.admission_deadline = deadline
         task.images = images or []
+        task.aspect_ratio = aspect_ratio
+        task.aspect_ratio_automatic = aspect_ratio_automatic
+        task.aspect_ratio_origin = aspect_ratio_origin if aspect_ratio else "配置默认"
+        if aspect_ratio_automatic and ratio_capability(self.config, self.config.general.provider) == "unknown":
+            task.aspect_ratio_feedback = "首选路由画幅能力未知，源比例未应用；沿用原配置及路由，不保证输出尺寸"
+        task.source_canvas = source_canvas
         task.max_attempts = self.config.general.retry_times + 1
         self._remember_task(task)
         self._runners[task.task_id] = asyncio.create_task(self._run_task(task))
@@ -860,7 +1023,7 @@ class NekoDraw(MaiBotPlugin):
                        if self._is_draw_turn(items_for_scope(items, sid), None)] if focused else []
         draw_turn = bool(draw_scopes) if focused else self._is_draw_turn(items if isinstance(items, list) else None, messages if isinstance(messages, list) else None)
         if self.config.plugin.enabled and draw_turn:
-            instruction = self._planner_instruction(self.config.self_portrait.enabled)
+            instruction = self._planner_instruction(self.config.self_portrait.enabled, planner_ratio_hints(self.config))
             if focused:
                 instruction = '仅针对以下目标聊天的本次绘图请求（不是自动执行授权）：' + json.dumps(draw_scopes) + '\n' + instruction
             draw_changed = False
@@ -999,6 +1162,8 @@ class NekoDraw(MaiBotPlugin):
                 state += " 不要再说还在画或等待出图；无需重复发送或仅为宣告完成而刷屏。"
             if task.status == 'failed':
                 state += " 详细原因请按需查询 neko_draw_status；不要仅因这条状态重复道歉或重新生成。"
+            if task.aspect_ratio:
+                state += f" 画幅请求{task.aspect_ratio}；" + (task.aspect_ratio_feedback or "按后端映射，chat仅构图建议，不保证尺寸") + "。"
         notice = marker + "\n" + state + "\n这是本聊天在本次规划请求前核实的状态，优先于旧的排队/提交回执；不构成新的生图请求。"
         inserted = False
         if isinstance(items, list):
@@ -1083,7 +1248,8 @@ class NekoDraw(MaiBotPlugin):
         }
 
     @staticmethod
-    def _planner_instruction(self_reference_enabled: bool = False) -> str:
+    def _planner_instruction(self_reference_enabled: bool = False, ratio_hints=None) -> str:
+        draw_hint, edit_hint = ratio_hints or (DRAW_RATIO_HINT, EDIT_RATIO_HINT)
         if self_reference_enabled:
             return (
                 "仅当前用户确实要求画图时才使用生图工具；历史提及、闲聊和取消不算。"
@@ -1091,12 +1257,14 @@ class NekoDraw(MaiBotPlugin):
                 "插件附管理员角色参考图，不必先调用query_memory，prompt只写本次场景、动作、服装或画风，不编造消息ID或文件路径。"
                 "修改聊天原图或GIF动图用neko_edit_image，GIF编辑自动补充高分辨率高帧要求；需要机器人外貌时同样设use_self_reference=true，保留聊天原图并追加角色参考。"
                 "用户自拍、其他人物、无人场景和Life插画不附角色参考。参考图不可用时如实说明，不退回纯文生图。"
+                + draw_hint + edit_hint
             )
         return (
             "仅当前用户确实要求画图时才使用生图工具；历史提及、闲聊和取消不算。"
             "修改聊天原图或GIF动图用neko_edit_image，以原图为依据；GIF编辑自动补充高分辨率高帧要求。"
             "自画像先调用 query_memory 查长期记忆中的外貌，再把查到的特征用于neko_draw；未知特征不当作已有记忆，用户要求的新造型作为本次设定。"
             "其他文生图按用户要求调用neko_draw；自然语言、标签或混合描述均可。"
+            + draw_hint + edit_hint
         )
 
     @staticmethod
@@ -1137,6 +1305,7 @@ class NekoDraw(MaiBotPlugin):
         if not isinstance(definitions, list) or not definitions:
             return False
         hints = self._draw_tool_hints(bool(self.config.self_portrait.enabled))
+        draw_hint, edit_hint = planner_ratio_hints(self.config)
         rewritten: List[Any] = []
         changed = False
         for tool in definitions:
@@ -1146,7 +1315,8 @@ class NekoDraw(MaiBotPlugin):
                 rewritten.append(tool)
                 continue
             new_function = dict(function)
-            new_function["description"] = hint["description"]
+            ratio_hint = draw_hint if function["name"] == "neko_draw" else edit_hint
+            new_function["description"] = hint["description"] + ratio_hint
             parameters = function.get("parameters")
             properties = parameters.get("properties") if isinstance(parameters, dict) else None
             flag = properties.get("use_self_reference") if isinstance(properties, dict) else None
@@ -1158,6 +1328,13 @@ class NekoDraw(MaiBotPlugin):
                 new_properties["use_self_reference"] = new_flag
                 new_parameters["properties"] = new_properties
                 new_function["parameters"] = new_parameters
+            ratio_parameter = properties.get("aspect_ratio") if isinstance(properties, dict) else None
+            if isinstance(ratio_parameter, dict):
+                new_parameters = dict(new_function.get("parameters", parameters))
+                new_properties = dict(new_parameters["properties"])
+                new_properties["aspect_ratio"] = {**ratio_parameter, "description": ratio_hint}
+                new_parameters["properties"] = new_properties
+                new_function["parameters"] = new_parameters
             rewritten.append({"type": "function", "function": new_function})
             changed = True
         if changed:
@@ -1167,7 +1344,7 @@ class NekoDraw(MaiBotPlugin):
     @Tool(
         "neko_draw",
         trusted_context="neko.tools.context.v1",
-        brief_description="文生图生成新图。",
+        brief_description="文生图生成新图；已知画幅能力时用户指定优先，否则按画面选比例。",
         detailed_description=(
             "生成全新图片；修改聊天中已有图片用neko_edit_image。"
             "画机器人自己的提示按当前自画像配置处理：已配置参考图时设use_self_reference=true由插件附图，"
@@ -1183,17 +1360,23 @@ class NekoDraw(MaiBotPlugin):
             ),
             ToolParameterInfo(name="use_self_reference", param_type=ToolParamType.BOOLEAN,
                               description="是否画机器人自己，按当前自画像配置的说明使用；不接受路径或消息ID。", required=False),
+            ToolParameterInfo(name="aspect_ratio", param_type=ToolParamType.STRING,
+                              description=DRAW_RATIO_HINT, enum_values=list(ASPECT_RATIOS), required=False),
         ],
     )
-    async def draw(self, prompt: str = "", use_self_reference: bool = False, **kwargs: Any) -> Dict[str, Any]:
+    async def draw(self, prompt: str = "", use_self_reference: bool = False, aspect_ratio: Optional[str] = None, **kwargs: Any) -> Dict[str, Any]:
         identity = self._tool_identity(kwargs.get("_host_context"))
         if identity is None:
             return {"success": False, "content": "可信聊天身份缺失或矛盾，本次未提交。"}
-        return await self._draw(prompt, use_self_reference, **identity)
+        return await self._draw(prompt, use_self_reference, aspect_ratio, **identity)
 
     @admitted
-    async def _draw(self, prompt: str = "", use_self_reference: bool = False, **kwargs: Any) -> Dict[str, Any]:
+    async def _draw(self, prompt: str = "", use_self_reference: bool = False, aspect_ratio: Optional[str] = None, **kwargs: Any) -> Dict[str, Any]:
         generation = self._generation_id()
+        try:
+            ratio = normalize_aspect_ratio(aspect_ratio, allow_source=False)
+        except ValueError as exc:
+            return {"success": False, "content": str(exc) + "，未提交。"}
         if not isinstance(prompt, str) or type(use_self_reference) is not bool:
             return {"success": False, "content": "提示词或自画像参考参数无效"}
         if len(prompt) > MAX_PROMPT_CHARS:
@@ -1225,7 +1408,8 @@ class NekoDraw(MaiBotPlugin):
             if active is not None:
                 return {"success": False, "content": "上一张还没画完。\n" + active.summary()}
             text = portrait_prompt(text)
-        task = self._start_task(stream_id, text, str(kwargs.get("user_id") or ""), images) if images else self._start_task(stream_id, text, str(kwargs.get("user_id") or ""))
+        extra = {"aspect_ratio": ratio} if ratio else {}
+        task = self._start_task(stream_id, text, str(kwargs.get("user_id") or ""), images, **extra) if images else self._start_task(stream_id, text, str(kwargs.get("user_id") or ""), **extra)
         task.display_prompt = prompt.strip()
         return {
             "success": True,
@@ -1235,7 +1419,7 @@ class NekoDraw(MaiBotPlugin):
     @Tool(
         "neko_edit_image",
         trusted_context="neko.tools.context.v1",
-        brief_description="修改聊天原图或GIF动图。",
+        brief_description="修改聊天原图或GIF动图；已知画幅能力时默认匹配主源图。",
         detailed_description=(
             "用户要求修改这张图、换背景、换装、重绘、参考原图时调用。"
             "source_message_id 填当前聊天中图片/表情包或引用消息的真实 ID，也支持上下文短消息编号及工具媒体索引，不能编造。"
@@ -1248,17 +1432,23 @@ class NekoDraw(MaiBotPlugin):
             ToolParameterInfo(name="source_message_id", param_type=ToolParamType.STRING, description="当前聊天中的真实消息ID、短消息编号或工具媒体索引", required=True),
             ToolParameterInfo(name="source_image_index", param_type=ToolParamType.INTEGER, description="可选，指定普通图片在源消息中的索引，从0开始；不用于emoji表情包", required=False),
             ToolParameterInfo(name="use_self_reference", param_type=ToolParamType.BOOLEAN, description="修改涉及机器人角色外貌时按当前自画像配置的说明使用；不填本地路径。", required=False),
+            ToolParameterInfo(name="aspect_ratio", param_type=ToolParamType.STRING,
+                              description=EDIT_RATIO_HINT, enum_values=[*ASPECT_RATIOS, "source"], required=False),
         ],
     )
-    async def edit_image(self, prompt: str = "", source_message_id: str = "", source_image_index: int | None = None, use_self_reference: bool = False, **kwargs: Any) -> Dict[str, Any]:
+    async def edit_image(self, prompt: str = "", source_message_id: str = "", source_image_index: int | None = None, use_self_reference: bool = False, aspect_ratio: Optional[str] = None, **kwargs: Any) -> Dict[str, Any]:
         identity = self._tool_identity(kwargs.get("_host_context"))
         if identity is None:
             return {"success": False, "content": "可信聊天身份缺失或矛盾，本次未提交。"}
-        return await self._edit_image(prompt, source_message_id, source_image_index, use_self_reference, **identity)
+        return await self._edit_image(prompt, source_message_id, source_image_index, use_self_reference, aspect_ratio, **identity)
 
     @admitted
-    async def _edit_image(self, prompt: str = "", source_message_id: str = "", source_image_index: int | None = None, use_self_reference: bool = False, **kwargs: Any) -> Dict[str, Any]:
+    async def _edit_image(self, prompt: str = "", source_message_id: str = "", source_image_index: int | None = None, use_self_reference: bool = False, aspect_ratio: Optional[str] = None, **kwargs: Any) -> Dict[str, Any]:
         generation = self._generation_id()
+        try:
+            ratio = normalize_aspect_ratio(aspect_ratio)
+        except ValueError as exc:
+            return {"success": False, "content": str(exc) + "，未提交。"}
         if not isinstance(prompt, str) or not isinstance(source_message_id, str) or type(use_self_reference) is not bool:
             return {"success": False, "content": "修改要求、原图编号或自参考参数无效"}
         stream_id = self._stream_id(kwargs)
@@ -1277,6 +1467,17 @@ class NekoDraw(MaiBotPlugin):
         source_count = len(images)
         if not images:
             return {"success": False, "content": "没有取得聊天原图，未提交；角色参考不能代替待修改原图。"}
+        ratio_origin = "显式参数"
+        canvas = None
+        if ratio in (None, "source"):
+            try:
+                canvas = await image_work(source_canvas, images[0])
+                ratio = nearest_ratio(canvas[0] / canvas[1])
+            except Exception:
+                return {"success": False, "content": "无法读取主源图画布尺寸，本次未提交。"}
+            ratio_origin = f"主源图画布{canvas[0]}×{canvas[1]}匹配（最接近支持比例，不保证原像素尺寸）"
+            if not self._current(generation):
+                return {"success": False, "content": "插件生命周期已更改，本次未提交。"}
         text = prompt.strip()
         if any(image.startswith((b'GIF87a', b'GIF89a')) for image in images) and '高分辨率高帧' not in text:
             text += '\n高分辨率高帧'
@@ -1298,7 +1499,9 @@ class NekoDraw(MaiBotPlugin):
             return {"success": False, "content": "插件已禁用，本次未提交。"}
         if self._active_task(stream_id):
             return {"success": False, "content": "上一张还没画完。\n" + self._status_text(stream_id)}
-        task = self._start_task(stream_id, text, str(kwargs.get("user_id") or ""), images)
+        task = self._start_task(stream_id, text, str(kwargs.get("user_id") or ""), images,
+                                aspect_ratio=ratio, aspect_ratio_origin=ratio_origin, source_canvas=canvas,
+                                aspect_ratio_automatic=aspect_ratio is None)
         task.display_prompt = prompt.strip()
         notice = f"已读取 {source_count} 张聊天原图" + ("，并在最后附1张角色外貌参考" if use_self_reference else "")
         return {"success": True, "content": notice + "并提交图生图，不代表已经生成成功。完成后直接发图；以下仅为提交时快照，后续以插件实时状态或 neko_draw_status 为准。\n" + task.summary()}

@@ -118,7 +118,8 @@ class ReviewSafety(unittest.IsolatedAsyncioTestCase):
         async def source(*args, **kwargs):
             generation, _ = self.bot._reservations['chat']
             self.bot._reservations['chat'] = (generation, time.monotonic() - 1)
-            return [b'source']
+            from test_tool_context import SOURCE_PNG
+            return [SOURCE_PNG]
         with patch.object(mod, 'resolve_edit_images', side_effect=source):
             result = await self.bot.edit_image(prompt='edit', _host_context=tool_context())
         self.assertFalse(result['success'])

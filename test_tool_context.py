@@ -1,9 +1,12 @@
 """Offline Host-envelope, command platform and source-routing regressions."""
 import copy
+import base64
 import re
 import types
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
+
+SOURCE_PNG = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC')
 
 
 def tool_context(session='chat', platform='qq', user='123', **changes):
@@ -53,7 +56,7 @@ class IdentityTests(unittest.IsolatedAsyncioTestCase):
             result = await self.bot.draw(prompt='cat', **kwargs)
             self.assertTrue(result['success'])
             self.assertEqual(self.bot._start_task.call_args.args[:3], ('chat', 'cat', '123'))
-            with patch.object(self.mod, 'resolve_edit_images', new_callable=AsyncMock, return_value=[b'source']) as source:
+            with patch.object(self.mod, 'resolve_edit_images', new_callable=AsyncMock, return_value=[SOURCE_PNG]) as source:
                 result = await self.bot.edit_image(prompt='edit', source_message_id='m', **kwargs)
                 self.assertTrue(result['success'])
                 self.assertEqual(source.call_args.args[1:4], ('chat', 'm', None))
@@ -73,7 +76,7 @@ class IdentityTests(unittest.IsolatedAsyncioTestCase):
             envelope = dict(contract='neko.tools.context.v1', session_id='chat', stream_id='chat', **extra)
             self.assertTrue((await self.bot.draw(prompt='cat', _host_context=envelope))['success'])
             self.assertTrue((await self.bot.draw_status(_host_context=envelope))['success'])
-            with patch.object(self.mod, 'resolve_edit_images', new_callable=AsyncMock, return_value=[b'source']):
+            with patch.object(self.mod, 'resolve_edit_images', new_callable=AsyncMock, return_value=[SOURCE_PNG]):
                 self.assertTrue((await self.bot.edit_image(prompt='edit', source_message_id='m', _host_context=envelope))['success'])
 
     async def test_normal_and_focus_empty_account_host_shapes_for_qq_tg_group_private(self):
@@ -90,7 +93,7 @@ class IdentityTests(unittest.IsolatedAsyncioTestCase):
                         kwargs = dict(_host_context=context, stream_id='foreign', message={'forged': True})
                         self.assertTrue((await self.bot.draw(prompt='cat', **kwargs))['success'])
                         self.assertEqual(self.bot._start_task.call_args.args[0], session)
-                        with patch.object(self.mod, 'resolve_edit_images', new_callable=AsyncMock, return_value=[b'source']) as source:
+                        with patch.object(self.mod, 'resolve_edit_images', new_callable=AsyncMock, return_value=[SOURCE_PNG]) as source:
                             self.assertTrue((await self.bot.edit_image(prompt='edit', source_message_id='m', **kwargs))['success'])
                             self.assertEqual(source.call_args.args[1:4], (session, 'm', None))
                         with patch.object(self.bot, '_status_text', return_value='status') as status:
@@ -130,7 +133,7 @@ class IdentityTests(unittest.IsolatedAsyncioTestCase):
         self.bot.config.command.allowed_user_ids = ['123']
         kwargs = command_context()
         before = copy.deepcopy(kwargs)
-        with patch.object(self.mod, 'resolve_edit_images', new_callable=AsyncMock, return_value=[b'source']) as source:
+        with patch.object(self.mod, 'resolve_edit_images', new_callable=AsyncMock, return_value=[SOURCE_PNG]) as source:
             self.assertTrue((await self.bot.cmd_draw(**kwargs, matched_groups={'payload': 'edit background'}))[0])
             self.assertEqual(source.call_args.args[1:4], ('chat', '', kwargs['message']))
         self.assertEqual(kwargs, before)

@@ -31,7 +31,7 @@ async def verify(host):
 
     root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(root))
-    from test_tool_context import tool_context
+    from test_tool_context import tool_context, SOURCE_PNG
 
     package = ModuleType('draw_host_integration')
     package.__path__ = [str(root)]
@@ -87,7 +87,7 @@ async def verify(host):
                         assert payload['_host_context']['account_id'] == ''
                         # Host intentionally preserves ordinary model kwargs: plugin must ignore them.
                         assert payload['stream_id'] == 'foreign'
-                        with patch.object(mod, 'resolve_edit_images', new_callable=AsyncMock, return_value=[b'source']) as source, \
+                        with patch.object(mod, 'resolve_edit_images', new_callable=AsyncMock, return_value=[SOURCE_PNG]) as source, \
                                 patch.object(bot, '_status_text', return_value='trusted status') as status:
                             result = await handler(**payload)
                             assert result['success'], (session, name, result)

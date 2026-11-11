@@ -1,5 +1,31 @@
 # Neko 生图
 
+## 1.4.10：逐任务画幅
+
+`neko_draw`、`neko_edit_image`新增可选`aspect_ratio`：`1:1`、`4:3`、`3:4`、`3:2`、`2:3`、`16:9`、`9:16`。工具实际description、参数Schema及两种自画像配置的Planner提示按当前有效路由能力调整：**已登记能力或明确chat模式时，用户指定优先；新画未指定时Planner按画面主动选比例**（如横向风景16:9、竖幅人物2:3）。未知native/Images能力则不主动添加参数；用户指定画幅时先说明不能保证，不以省略参数假称支持。没有额外Planner/模型调用，也不保证模型每次都选参。
+
+- draw省略参数保持原配置默认；角色参考图不能决定新画画幅。`/draw`文字命令仍不解析尺寸语法；Life签名接口不新增画幅字段，默认关闭保持。
+- edit省略参数时，用第一张聊天原图的**实际画布宽高**推断比例，但仅在已知能力路由应用；未知能力保留原配置/原路由，回执及状态明确“源比例未应用”。显式`source`要求应用源比例，与显式比例一样，在未知能力路由请求前拒绝。多图仍以首图为主，显式`source_image_index`选图后以选中图为主。附在最后的角色参考不影响画幅。显式比例覆盖源图推断；匹配不是保持原像素尺寸，非枚举比例会近似。
+- 不提供`auto`：新画由现有Planner选具体枚举，改图由本地读主源画布；不把全局配置改成空值/auto冒充自动选择。GIF只补读已经校验过的画布头，不额外解码帧；原媒体预算、image_work线程位及取消等待保持。
+
+### 后端支持边界
+
+| 路径 / 已登记模型 | 画幅实现 |
+| --- | --- |
+| Gemini native：`gemini-2.5-flash-image`、`gemini-3-pro-image`、`gemini-3.1-flash-image`及各自`-preview` | 传`generationConfig.imageConfig.aspectRatio`，上述七比例；不增加imageSize、不改模型 |
+| OpenAI Images：`gpt-image-2`、`gpt-image-2-2026-04-21` | 1:1→1024×1024；4:3→1024×768；3:4→768×1024；3:2→1536×1024；2:3→1024×1536；16:9→1536×864；9:16→864×1536。generations JSON与edits multipart同一映射 |
+| OpenAI Images：`gpt-image-1`、`gpt-image-1-mini`、`gpt-image-1.5` | 仅1024×1024、1536×1024、1024×1536；最接近比例映射，状态明确说明近似/非精确比例。旧模型名登记尺寸合同不代表官方仍提供该模型 |
+| 明确OpenAI chat、Gemini openai兼容chat；已登记模型的OpenAI auto chat备路 | 仅追加提示词构图建议，**没有标准尺寸字段，不保证输出比例或像素**；回执/状态明确限制 |
+| 未登记的native/Images模型、任意模型别名 | draw/edit省略保留旧配置/路由；edit明确报告源比例未应用。显式比例/source在到达此路由时、发HTTP前拒绝，不猜能力、不因本地不支持切路由 |
+
+OpenAI `mode=auto`以配置模型的Images能力登记为共同准入条件，**不随成功路径缓存变化**：未知模型冷启动和缓存chat均不接受显式画幅，省略则都沿原路由偏好运行，改图源比例均不应用。明确`mode=chat`才可独立用提示词建议。只检查实际尝试的供应商；已知首选可成功时，未知备用不提前否决它。只有原有明确未执行失败才进入备用；到达未知备用时，省略的改图保持其原配置，显式画幅拒绝，不新增网络探针、重试或unknown绕行。
+
+当前维护部署文档记录主模型为CPA→Antigravity的`gemini-3.1-flash-image`、native、fallback none；本次只改插件源码，不读写线上配置、不探测供应商。上述为请求参数能力，不是中转实际遵从或最终输出尺寸验收；现有公开接口/模型仍可能拒绝请求。任务从提交、排队、执行到状态保留请求比例、源画布及实际路由映射；原始用户prompt仍用于历史。尺寸不参与聊天身份/准入键；非法比例在取图/付费前拒绝，HTTP200后坏结果仍unknown、不重试或换路由。
+
+官方依据（2026-11-11经Context7查询）：[OpenAI Images generations](https://developers.openai.com/api/reference/resources/images/methods/generate)、[OpenAI image prompting](https://developers.openai.com/api/docs/guides/image-prompting)、[Gemini imageConfig](https://ai.google.dev/gemini-api/docs/generate-content/image-generation)。GPT Image 2文档允许16倍数的WIDTH×HEIGHT、宽高比1:3–3:1；这里只开放上述有限低分辨率映射，不开放任意像素/超高分辨率。官方页面直取当次403/超时，能力依据为Context7官方索引，未做真实生成验证。
+
+离线回归经过真实SDK参数Schema/PluginContext、底层假RPC/HTTP、真实后台任务和multipart序列化，覆盖默认、横竖、首源/角色参考/GIF、provider边界、非法输入、排队防重及unknown一次POST；不发真实模型/QQ/TG。
+
 ## 1.4.9：可信身份与平台命令名单
 
 三个工具（`neko_draw`、`neko_edit_image`、`neko_draw_status`）要求维护 Host 的 `neko.tools.context.v1` opt-in 补丁：Host 必须覆盖模型传入的 `_host_context`，提供非空且一致的 `session_id`/`stream_id`；缺失契约、空会话或矛盾会话直接拒绝，普通 kwargs 中的身份、消息/图片不能覆盖该信封。工具按可信会话隔离，不以平台或账号字段授权；普通和共享 Focus 路径没有消息锚点时，Host 的空 `account_id` 是合法形状，不猜账号或借用其他会话。仅安装官方 SDK 不代表 Host 已具备补丁。

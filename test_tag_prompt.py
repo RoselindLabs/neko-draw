@@ -4,6 +4,7 @@ import pathlib
 import types
 import unittest
 from unittest.mock import Mock
+from test_admission_safety import mod
 
 TREE = ast.parse(pathlib.Path(__file__).with_name('plugin.py').read_text(encoding='utf-8'))
 CLASS = next(n for n in TREE.body if isinstance(n, ast.ClassDef) and n.name == 'NekoDraw')
@@ -16,7 +17,8 @@ for node in NODES:
         arg.annotation = None
     if node.args.kwarg:
         node.args.kwarg.annotation = None
-namespace = {'MAX_PROMPT_CHARS': 4000}
+namespace = {'MAX_PROMPT_CHARS': 4000, 'normalize_aspect_ratio': mod.normalize_aspect_ratio,
+             'DRAW_RATIO_HINT': mod.DRAW_RATIO_HINT, 'EDIT_RATIO_HINT': mod.EDIT_RATIO_HINT}
 exec(compile(ast.Module(body=NODES, type_ignores=[]), 'plugin.py', 'exec'), namespace)
 namespace['draw'] = namespace['_draw']
 

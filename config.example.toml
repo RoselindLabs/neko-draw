@@ -23,6 +23,8 @@ enabled = true
 base_url = "https://api.openai.com/v1"
 api_key = "你的_API_Key"
 model = "gpt-image-2"
+# 未传逐任务aspect_ratio的draw仍用此值；显式比例按已登记模型映射合法size。
+# chat模式只使用提示词构图建议，不保证尺寸；不把此默认改成auto。
 size = "1024x1024"
 # auto：先 /v1/images/generations，失败再 /v1/chat/completions。
 # images 或 chat：只用其中一种。
@@ -35,6 +37,7 @@ enabled = false
 base_url = "https://generativelanguage.googleapis.com"
 api_key = "你的_Gemini_Key"
 model = "gemini-3.1-flash-image-preview"
+# 未传逐任务aspect_ratio的draw仍用此值；edit仅已知能力时匹配主源画布，未知沿用配置。
 aspect_ratio = "1:1"
 # native：Gemini generateContent。openai：把上面的地址当 OpenAI 兼容网关。
 mode = "native"
