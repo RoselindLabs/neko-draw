@@ -1273,7 +1273,7 @@ class NekoDraw(MaiBotPlugin):
             return (
                 "仅当前用户确实要求画图时才使用生图工具；历史提及、闲聊和取消不算。"
                 "画你自己、你的自拍、自画像或以你为主角用neko_draw并设use_self_reference=true，"
-                "插件附管理员角色参考图，不必先调用query_memory，prompt只写本次场景、动作、服装或画风，不编造消息ID或文件路径。"
+                "插件附管理员角色参考图，不必先调用query_memory；外貌参考图，穿搭按本次要求或当前聊天，未指定可为本图搭配，不照搬旧衣服或冒称真实经历。prompt写本次画面，不编造消息ID或路径。"
                 "修改聊天源图或GIF动图用neko_edit_image；上下文预览可能压缩，不能称为原始文件。GIF编辑仅补充高分辨率高帧要求，不保证效果；需要机器人外貌时同样设use_self_reference=true，保留聊天源图并追加角色参考。"
                 "用户自拍、其他人物、无人场景和Life插画不附角色参考。参考图不可用时如实说明，不退回纯文生图。"
                 + draw_hint + edit_hint
@@ -1281,7 +1281,7 @@ class NekoDraw(MaiBotPlugin):
         return (
             "仅当前用户确实要求画图时才使用生图工具；历史提及、闲聊和取消不算。"
             "修改聊天源图或GIF动图用neko_edit_image；上下文预览可能压缩，不能称为原始文件。GIF编辑仅补充高分辨率高帧要求，不保证效果。"
-            "自画像先调用 query_memory 查长期记忆中的外貌，再把查到的特征用于neko_draw；未知特征不当作已有记忆，用户要求的新造型作为本次设定。"
+            "自画像先调用 query_memory，只提取可辨识外貌用于neko_draw；穿搭按本次要求或当前聊天，未指定可为本图搭配，不把人设或旧记忆中的衣服当固定制服。未知外貌不冒称记忆。"
             "其他文生图按用户要求调用neko_draw；自然语言、标签或混合描述均可。"
             + draw_hint + edit_hint
         )
@@ -1294,7 +1294,7 @@ class NekoDraw(MaiBotPlugin):
                 "neko_draw": {
                     "description": (
                         "画图/文生图生成新图；修改聊天原图用neko_edit_image。"
-                        "画机器人自己（含自拍、自画像）设use_self_reference=true，无需先查query_memory。"
+                        "画机器人自己（含自拍、自画像）设use_self_reference=true，无需先查query_memory；参考图定外貌，不固定服装。"
                     ),
                     "flag_description": "仅画机器人自己时设true，插件附管理员角色参考图；prompt只写场景、动作、服装或画风。参考图不可用则失败，不退回纯文生图。其他人物、用户自拍或无人场景保持false；不接受路径或消息ID。",
                 },
@@ -1307,12 +1307,12 @@ class NekoDraw(MaiBotPlugin):
             "neko_draw": {
                 "description": (
                     "画图/文生图生成新图；修改聊天原图用neko_edit_image。"
-                    "画机器人自己（含自拍、自画像）先用query_memory查长期记忆外貌，写入prompt，不编造未知特征。"
+                    "画机器人自己（含自拍、自画像）先用query_memory查长期记忆外貌，只提取可辨识特征，不固定照搬记忆中的衣服。"
                 ),
                 "flag_description": "当前未配置角色参考图，保持false；画机器人自己先用query_memory查记忆外貌。",
             },
             "neko_edit_image": {
-                "description": "改图/图生图：修改聊天图片或GIF，如换背景、换装、重绘。当前未配置角色参考图；涉及机器人外貌时先用query_memory查记忆并写入prompt。",
+                "description": "改图/图生图：修改聊天图片或GIF，如换背景、换装、重绘。当前未配置角色参考图；需补机器人外貌时查query_memory，仅取外貌特征，不用旧衣服覆盖本次换装要求。",
                 "flag_description": "当前未配置角色参考图，保持false。",
             },
         }
@@ -1366,14 +1366,14 @@ class NekoDraw(MaiBotPlugin):
         detailed_description=(
             "生成全新图片；修改聊天中已有图片用neko_edit_image。"
             "画机器人自己的提示按当前自画像配置处理：已配置参考图时设use_self_reference=true由插件附图，"
-            "未配置时先用query_memory查记忆中的外貌。"
+            "未配置时先用query_memory查可辨识外貌，不把记忆中的衣服当固定制服。"
             "自然语言、标签或混合描述均可，无需列全画面要素。"
         ),
         parameters=[
             ToolParameterInfo(
                 name="prompt",
                 param_type=ToolParamType.STRING,
-                description="主体、场景、动作、服装或画风；自然语言/标签均可",
+                description="主体、场景、动作、服装或画风；自画像穿搭按本次要求或当前聊天，未指定可为本图搭配，不冒称真实经历。自然语言/标签均可",
                 required=True,
             ),
             ToolParameterInfo(name="use_self_reference", param_type=ToolParamType.BOOLEAN,
