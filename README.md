@@ -186,7 +186,7 @@ Linux/Windows×Python3.12/3.14完整59项回归通过。提醒终态边界改用
 
 ## CI、离线回归与源码包
 
-日常源码CI用Linux生产Python3.14.4/SDK2.16.0与Windows最低Python3.12/SDK2.12两组跑完整自有回归、依赖/lint和包导入；原8组兼容矩阵保留在v标签、手动full及有源码变化的夜间验证，另保留固定生产组合，不把latest当线上。
+日常源码CI用Ubuntu 24.04生产组合（CPython 3.14.4、SDK 2.23.0）与Windows最低Python3.12/SDK2.12两组跑完整自有回归、依赖/lint和包导入；原8组兼容矩阵保留在v标签、手动full及有源码变化的夜间验证，另保留固定生产组合，不把latest当线上。
 SDK 的 PyPI 包名是 `maibot-plugin-sdk`，导入名为 `maibot_sdk`；必须安装真实 SDK，不以 stub 替代。
 
 ```sh

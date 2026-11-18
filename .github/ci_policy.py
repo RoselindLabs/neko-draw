@@ -15,7 +15,7 @@ import urllib.parse
 import urllib.request
 
 PRODUCTION_PYTHON = "3.14.4"
-PRODUCTION_SDK = "==2.16.0"
+PRODUCTION_SDK = "==2.23.0"
 
 
 def is_documentation(name):
