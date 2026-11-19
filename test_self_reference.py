@@ -215,10 +215,10 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
         result = await self.bot.configure_planner(session_id='chat', items=[], tool_definitions=definitions)
         payload = result['modified_kwargs']['tool_definitions']
         by_name = {tool['function']['name']: tool['function'] for tool in payload}
-        self.assertIn('无需先查query_memory', by_name['neko_draw']['description'])
-        self.assertIn('use_self_reference=true', by_name['neko_draw']['description'])
-        self.assertIn('角色参考附最后', by_name['neko_edit_image']['parameters']['properties']['use_self_reference']['description'])
-        self.assertIn('设true，插件附管理员角色参考图', by_name['neko_draw']['parameters']['properties']['use_self_reference']['description'])
+        self.assertIn('新图', by_name['neko_draw']['description'])
+        self.assertIn('GIF', by_name['neko_edit_image']['description'])
+        self.assertIn('聊天源图之后', by_name['neko_edit_image']['parameters']['properties']['use_self_reference']['description'])
+        self.assertIn('角色外貌参考图', by_name['neko_draw']['parameters']['properties']['use_self_reference']['description'])
         self.assertEqual(by_name['reply']['description'], 'registered')
         self.assertEqual(by_name['neko_draw_status']['description'], 'registered')
         self.assertNotIn('query_memory', by_name['neko_edit_image']['parameters']['properties']['use_self_reference']['description'])
@@ -228,10 +228,9 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
         definitions = self._tool_definitions()
         result = await self.bot.configure_planner(session_id='chat', items=[], tool_definitions=definitions)
         by_name = {tool['function']['name']: tool['function'] for tool in result['modified_kwargs']['tool_definitions']}
-        self.assertIn('先用query_memory查长期记忆外貌', by_name['neko_draw']['description'])
-        self.assertIn('未配置角色参考图', by_name['neko_draw']['parameters']['properties']['use_self_reference']['description'])
-        self.assertIn('保持false', by_name['neko_edit_image']['parameters']['properties']['use_self_reference']['description'])
-        self.assertNotIn('use_self_reference=true', by_name['neko_draw']['description'])
+        self.assertNotIn('query_memory', by_name['neko_draw']['description'])
+        self.assertIn('query_memory', by_name['neko_draw']['parameters']['properties']['use_self_reference']['description'])
+        self.assertIn('保持 false', by_name['neko_edit_image']['parameters']['properties']['use_self_reference']['description'])
         self.assertEqual(by_name['reply']['description'], 'registered')
 
     async def test_disabled_plugin_and_foreign_definitions_are_left_alone(self):

@@ -143,6 +143,9 @@ def chat_ratio_prompt(prompt: str, ratio: Optional[str]) -> str:
     return prompt + f"\n画面构图建议：宽高比 {ratio}（此聊天接口不保证输出尺寸）。" if ratio else prompt
 
 
+DRAW_BRIEF = "按描述画一张新图，可画自画像。"
+EDIT_BRIEF = "按要求修改聊天中已有的图片或 GIF。"
+STATUS_BRIEF = "查看当前聊天最近一次绘图的进度或失败原因。"
 DRAW_RATIO_HINT = "仅当前路由已登记画幅能力或明确chat模式时，用户指定优先，否则按画面主动选择aspect_ratio；能力未知应省略，保留配置且不保证画幅。chat仅构图建议，不保证尺寸。"
 EDIT_RATIO_HINT = "用户指定画幅优先；省略时仅已知能力路由应用主源图比例，未知则保留配置并报告未应用。source/明确比例在未知能力路由会拒绝；角色参考不影响画幅，chat仅构图建议。"
 
@@ -1034,7 +1037,7 @@ class NekoDraw(MaiBotPlugin):
                        if self._is_draw_turn(items_for_scope(items, sid), None)] if focused else []
         draw_turn = bool(draw_scopes) if focused else self._is_draw_turn(items if isinstance(items, list) else None, messages if isinstance(messages, list) else None)
         if self.config.plugin.enabled and draw_turn:
-            instruction = self._planner_instruction(self.config.self_portrait.enabled, planner_ratio_hints(self.config))
+            instruction = self._planner_instruction(self.config.self_portrait.enabled)
             if focused:
                 instruction = '仅针对以下目标聊天的本次绘图请求（不是自动执行授权）：' + json.dumps(draw_scopes) + '\n' + instruction
             draw_changed = False
@@ -1267,8 +1270,7 @@ class NekoDraw(MaiBotPlugin):
         }
 
     @staticmethod
-    def _planner_instruction(self_reference_enabled: bool = False, ratio_hints=None) -> str:
-        draw_hint, edit_hint = ratio_hints or (DRAW_RATIO_HINT, EDIT_RATIO_HINT)
+    def _planner_instruction(self_reference_enabled: bool = False) -> str:
         if self_reference_enabled:
             return (
                 "仅当前用户确实要求画图时才使用生图工具；历史提及、闲聊和取消不算。"
@@ -1277,7 +1279,6 @@ class NekoDraw(MaiBotPlugin):
                 "改聊天原图或GIF用neko_edit_image；需核对机器人外貌时设use_self_reference=true，无需查记忆。原图是编辑对象，换装按本次要求，其他内容保留，不复制角色参考的衣服。"
                 "预览可能压缩；GIF高分辨率高帧只是要求，不保证效果。不编造消息ID、路径或真实穿衣经历。"
                 "用户自拍、其他人物、无人场景和Life插画不附角色参考。参考图不可用时如实说明，不退回纯文生图。"
-                + draw_hint + edit_hint
             )
         return (
             "仅当前用户确实要求画图时才使用生图工具；历史提及、闲聊和取消不算。"
@@ -1285,47 +1286,19 @@ class NekoDraw(MaiBotPlugin):
             "改聊天原图或GIF用neko_edit_image，以原图为准；仅需补机器人外貌时查query_memory。换装按本次要求，其他内容保留，不用记忆衣服覆盖原图。"
             "预览可能压缩；GIF高分辨率高帧只是要求，不保证效果。未知外貌不冒称记忆，搭配不冒称真实经历。"
             "其他文生图按用户要求调用neko_draw；自然语言、标签或混合描述均可。"
-            + draw_hint + edit_hint
         )
-
-    @staticmethod
-    def _draw_tool_hints(self_reference_enabled: bool) -> Dict[str, Dict[str, str]]:
-        """按当前自画像配置给模型看的工具描述；静态注册文本无法随配置变化，由每轮 hook 改写。"""
-        if self_reference_enabled:
-            return {
-                "neko_draw": {
-                    "description": (
-                        "画图/文生图生成新图；修改聊天原图用neko_edit_image。"
-                        "自画像设use_self_reference=true，无需先查query_memory；参考只定外貌，穿搭按本次要求或当前聊天，OOTD未指定时设计新搭配，不默认沿用参考服装。"
-                    ),
-                    "flag_description": "仅画机器人自己时设true，插件附管理员角色参考图；其他人物、用户自拍或无人场景保持false。参考不可用则失败，不退回纯文生图；不接受路径或消息ID。",
-                },
-                "neko_edit_image": {
-                    "description": "改图/图生图：修改聊天图片或GIF。需核对机器人外貌时设use_self_reference=true，无需查记忆；以聊天原图为准，换装按本次要求，不复制角色参考服装，其他内容保留。",
-                    "flag_description": "修改涉及机器人角色且需核对外貌时设true；最多3张聊天源图在前，1张角色参考附最后，不替换源图，也不把所有人物改成该角色。参考不可用则失败，不降级。",
-                },
-            }
-        return {
-            "neko_draw": {
-                "description": (
-                    "画图/文生图生成新图；修改聊天原图用neko_edit_image。"
-                    "自画像先用query_memory查长期记忆外貌，只取可辨识特征。穿搭按本次要求或当前聊天，OOTD未指定时设计新搭配，不默认沿用记忆服装。"
-                ),
-                "flag_description": "当前未配置角色参考图，保持false。",
-            },
-            "neko_edit_image": {
-                "description": "改图/图生图：修改聊天图片或GIF，以原图为准。仅需补机器人外貌时查query_memory；换装按本次要求，不用记忆服装覆盖原图，其他内容保留。",
-                "flag_description": "当前未配置角色参考图，保持false。",
-            },
-        }
 
     def _rewrite_draw_tool_hints(self, kwargs: Dict[str, Any]) -> bool:
         """把neko_draw/neko_edit_image的工具与参数提示改写为当前自画像配置的版本，不动其他工具。"""
         definitions = kwargs.get("tool_definitions")
         if not isinstance(definitions, list) or not definitions:
             return False
-        hints = self._draw_tool_hints(bool(self.config.self_portrait.enabled))
         draw_hint, edit_hint = planner_ratio_hints(self.config)
+        reference = self.config.self_portrait.enabled
+        hints = {
+            "neko_draw": (DRAW_BRIEF, draw_hint, "仅画机器人自己时设 true，附角色外貌参考图。" if reference else "保持 false；自画像先用 query_memory 查外貌。"),
+            "neko_edit_image": (EDIT_BRIEF, edit_hint, "核对机器人外貌时设 true；角色参考附在最多 3 张聊天源图之后。" if reference else "保持 false；仅需补机器人外貌时查记忆。"),
+        }
         rewritten: List[Any] = []
         changed = False
         for tool in definitions:
@@ -1335,8 +1308,8 @@ class NekoDraw(MaiBotPlugin):
                 rewritten.append(tool)
                 continue
             new_function = dict(function)
-            ratio_hint = draw_hint if function["name"] == "neko_draw" else edit_hint
-            new_function["description"] = hint["description"] + "画幅选择见aspect_ratio参数说明。"
+            brief, ratio_hint, flag_hint = hint
+            new_function["description"] = brief
             parameters = function.get("parameters")
             properties = parameters.get("properties") if isinstance(parameters, dict) else None
             flag = properties.get("use_self_reference") if isinstance(properties, dict) else None
@@ -1344,7 +1317,7 @@ class NekoDraw(MaiBotPlugin):
                 new_parameters = dict(parameters)
                 new_properties = dict(properties)
                 new_flag = dict(flag)
-                new_flag["description"] = hint["flag_description"]
+                new_flag["description"] = flag_hint
                 new_properties["use_self_reference"] = new_flag
                 new_parameters["properties"] = new_properties
                 new_function["parameters"] = new_parameters
@@ -1364,13 +1337,7 @@ class NekoDraw(MaiBotPlugin):
     @Tool(
         "neko_draw",
         trusted_context="neko.tools.context.v1",
-        brief_description="画图/文生图生成新图，含自拍、自画像；已知画幅能力时用户指定优先，否则按画面选比例。",
-        detailed_description=(
-            "生成全新图片；修改聊天中已有图片用neko_edit_image。"
-            "画机器人自己的提示按当前自画像配置处理：已配置参考图时设use_self_reference=true由插件附图，"
-            "未配置时先用query_memory查可辨识外貌，不把记忆中的衣服当固定制服。"
-            "自然语言、标签或混合描述均可，无需列全画面要素。"
-        ),
+        brief_description=DRAW_BRIEF,
         parameters=[
             ToolParameterInfo(
                 name="prompt",
@@ -1439,12 +1406,7 @@ class NekoDraw(MaiBotPlugin):
     @Tool(
         "neko_edit_image",
         trusted_context="neko.tools.context.v1",
-        brief_description="改图/图生图：修改聊天图片或GIF；生成全新图片用neko_draw。",
-        detailed_description=(
-            "用于换背景、换装、重绘或参考原图。GIF保留动画，其他动图格式取首帧。"
-            "自参考编辑最多3张聊天源图加1张角色参考；源图或参考不可用均失败，不降级。"
-            "找不到源图请用户补发，不用文生图冒充。涉及机器人外貌时按use_self_reference说明处理。"
-        ),
+        brief_description=EDIT_BRIEF,
         parameters=[
             ToolParameterInfo(name="prompt", param_type=ToolParamType.STRING, description="修改要求及保留内容；只改指定部分，换装以本次要求为准。GIF保留动画，其他动图取首帧；自动补充高分辨率高帧要求，不保证效果", required=True),
             ToolParameterInfo(name="source_message_id", param_type=ToolParamType.STRING, description="当前聊天中图片、表情包或引用消息的真实ID，也支持短消息编号、工具媒体索引；不能编造。预览可能压缩，不保证原始文件；找不到源图请用户补发，不用文生图冒充。", required=True),
@@ -1527,8 +1489,7 @@ class NekoDraw(MaiBotPlugin):
     @Tool(
         "neko_draw_status",
         trusted_context="neko.tools.context.v1",
-        brief_description="查询当前聊天最近一次画图/生图的状态、进度或失败原因；不开始新绘图。",
-        detailed_description="失败原因仅提供最多180字符的错误摘录；长说明标记截断，不提供完整接口原文。",
+        brief_description=STATUS_BRIEF,
         parameters=[],
     )
     async def draw_status(self, **kwargs: Any) -> Dict[str, Any]:
